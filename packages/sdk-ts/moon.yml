@@ -1,0 +1,23 @@
+# sdk-ts moon task graph
+# https://moonrepo.dev/docs/config/project
+
+language: javascript
+
+tasks:
+  build:
+    command: cargo build -p tap-sdk
+    inputs:
+      - "src/**/*"
+      - "Cargo.toml"
+      - "build.rs"
+    deps:
+      - tap-core:build
+
+  install:
+    command: pnpm install
+
+  lint:
+    command: cargo clippy -p tap-sdk -- -D warnings
+
+  fmt:
+    command: cargo fmt -p tap-sdk -- --check

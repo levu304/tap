@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tap-core",
+    "crates/tap-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Tap Contributors"]
+license = "Apache-2.0"
+description = "Postgres Change Data Capture platform"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Identifiers
+uuid = { version = "1", features = ["v4"] }
+
+# Logging / observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"

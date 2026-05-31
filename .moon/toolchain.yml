@@ -1,0 +1,12 @@
+# Moon toolchain configuration
+# https://moonrepo.dev/docs/config/toolchain
+
+rust:
+  version: "1.85.0"
+  targets: []
+
+node:
+  version: "22.5.0"
+  packageManager:
+    pnpm:
+      version: "9.15.0"

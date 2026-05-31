@@ -1,0 +1,20 @@
+{
+  "name": "@tap/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Tap — PostgreSQL Change Data Capture",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "tap-sdk",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  }
+}
