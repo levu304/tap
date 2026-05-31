@@ -45,11 +45,11 @@ pub enum TapError {
     #[error("State store corruption: {0}")]
     StateCorruption(String),
 
+    /// Data decoding or format validation error (protocol violations, corrupt events).
+    #[error("Data decode error: {0}")]
+    Decode(String),
+
     /// Standard I/O error (file reads, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Generic fall-through error for one-off messages.
-    #[error("{0}")]
-    Other(String),
 }

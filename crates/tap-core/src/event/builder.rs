@@ -1,11 +1,48 @@
 //! Builder for constructing `ChangeEvent` values with auto-generated
 //! identifiers and timestamps.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
 use super::envelope::{ChangeEvent, Operation, SourceMetadata};
+use crate::error::TapError;
+
+/// Monotonic timestamp counter.
+///
+/// Guarantees strictly increasing values even when the wall clock jumps
+/// backwards (NTP corrections, leap seconds, VM pause).  Uses a CAS loop
+/// for thread safety without blocking.
+static MONO_TS: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a strictly monotonically increasing millisecond timestamp.
+fn monotonic_ts_ms() -> u64 {
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    loop {
+        let prev = MONO_TS.load(Ordering::Relaxed);
+        let next = prev.max(wall) + 1; // always advance by at least 1
+        if MONO_TS
+            .compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+#[cfg(test)]
+impl ChangeEventBuilder {
+    /// Sets a known expected `ts_ms`, bypassing monotonic generation.
+    /// Only available in test builds.
+    pub fn ts_ms(mut self, ts_ms: u64) -> Self {
+        self.ts_ms = Some(ts_ms);
+        self
+    }
+}
 
 /// Builder for [`ChangeEvent`].
 ///
@@ -20,7 +57,7 @@ use super::envelope::{ChangeEvent, Operation, SourceMetadata};
 ///     db: "mydb".into(),
 ///     schema: "public".into(),
 ///     table: "users".into(),
-///     lsn: "0/1234567".into(),
+///     lsn: "0/1234567".parse().unwrap(),
 ///     tx_id: "42".into(),
 ///     ts_ms: 1_700_000_000_000,
 ///     snapshot: None,
@@ -30,9 +67,10 @@ use super::envelope::{ChangeEvent, Operation, SourceMetadata};
 ///     .op(Operation::Create)
 ///     .after(Some(serde_json::json!({"id": 1, "name": "Alice"})))
 ///     .source(source)
-///     .build();
+///     .build()
+///     .unwrap();
 ///
-/// assert_eq!(event.op, "c");
+/// assert_eq!(event.op, Operation::Create);
 /// assert_eq!(event.source.db, "mydb");
 /// ```
 #[derive(Debug, Clone)]
@@ -41,6 +79,7 @@ pub struct ChangeEventBuilder {
     before: Option<Option<serde_json::Value>>,
     after: Option<Option<serde_json::Value>>,
     source: Option<SourceMetadata>,
+    ts_ms: Option<u64>,
 }
 
 impl ChangeEventBuilder {
@@ -51,6 +90,7 @@ impl ChangeEventBuilder {
             before: None,
             after: None,
             source: None,
+            ts_ms: None,
         }
     }
 
@@ -81,47 +121,41 @@ impl ChangeEventBuilder {
     /// Consumes the builder and produces a [`ChangeEvent`].
     ///
     /// Auto-generates:
-    /// * `ts_ms` — current system time in milliseconds since UNIX epoch
+    /// * `ts_ms` — monotonic timestamp (see [`monotonic_ts_ms`])
     /// * `id` — from source metadata, format `{lsn}:{tx_id}` for streaming,
     ///   `snap:{schema}.{table}:{uuid}` for snapshot events
     ///
-    /// Missing optional fields (`op`, `source`, `before`, `after`) are
-    /// filled with sensible defaults (op defaults to `Read`, source
-    /// defaults to an empty record).
-    pub fn build(self) -> ChangeEvent {
-        let ts_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+    /// # Errors
+    ///
+    /// Returns [`TapError::Config`] if `source` has not been set.
+    pub fn build(self) -> Result<ChangeEvent, TapError> {
+        let ts_ms = self.ts_ms.unwrap_or_else(monotonic_ts_ms);
 
-        let source = self.source.unwrap_or_default();
-        let op = self
-            .op
-            .map(|o| o.as_str().to_string())
-            .unwrap_or_else(|| Operation::Read.as_str().to_string());
+        let source = self.source.ok_or_else(|| {
+            TapError::Config("ChangeEventBuilder: source metadata is required".into())
+        })?;
+        let op = self.op.unwrap_or(Operation::Read);
 
         let id = Self::generate_id(&source);
 
-        ChangeEvent {
+        Ok(ChangeEvent {
             op,
             before: self.before.flatten(),
             after: self.after.flatten(),
             source,
             ts_ms,
             id,
-        }
+        })
     }
 
     /// Generates a unique event identifier from source metadata.
     fn generate_id(source: &SourceMetadata) -> String {
         match source.snapshot {
             Some(true) => {
-                // Snapshot events use a predictable prefix with a short UUID
                 let short = Uuid::new_v4().to_string();
                 format!("snap:{}.{}:{}", source.schema, source.table, short)
             }
             _ => {
-                // Streaming events use `{lsn}:{tx_id}` when available
                 if !source.lsn.is_empty() {
                     format!("{}:{}", source.lsn, source.tx_id)
                 } else {
@@ -138,22 +172,9 @@ impl Default for ChangeEventBuilder {
     }
 }
 
-impl Default for SourceMetadata {
-    fn default() -> Self {
-        Self {
-            db: String::new(),
-            schema: String::new(),
-            table: String::new(),
-            lsn: String::new(),
-            tx_id: String::new(),
-            ts_ms: 0,
-            snapshot: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::envelope::Lsn;
     use super::*;
 
     #[test]
@@ -162,25 +183,25 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: "0/1".into(),
+            lsn: Lsn("0/1".into()),
             tx_id: "1".into(),
             ts_ms: 100,
             snapshot: None,
         };
 
         let ops = [
-            (Operation::Create, "c"),
-            (Operation::Update, "u"),
-            (Operation::Delete, "d"),
-            (Operation::Read, "r"),
+            Operation::Create,
+            Operation::Update,
+            Operation::Delete,
+            Operation::Read,
         ];
-
-        for (op, expected) in &ops {
+        for op in &ops {
             let event = ChangeEventBuilder::new()
                 .op(*op)
                 .source(source.clone())
-                .build();
-            assert_eq!(event.op, *expected, "op={:?} should produce '{}'", op, expected);
+                .build()
+                .unwrap();
+            assert_eq!(event.op, *op, "op={:?} mismatch", op);
         }
     }
 
@@ -190,14 +211,14 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: String::new(),
+            lsn: Lsn::default(),
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: Some(true),
         };
 
-        let event = ChangeEventBuilder::new().source(source).build();
-        assert_eq!(event.op, "r");
+        let event = ChangeEventBuilder::new().source(source).build().unwrap();
+        assert_eq!(event.op, Operation::Read);
     }
 
     #[test]
@@ -206,7 +227,7 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: "0/ABCDEF".into(),
+            lsn: Lsn("0/ABCDEF".into()),
             tx_id: "123".into(),
             ts_ms: 0,
             snapshot: None,
@@ -215,7 +236,8 @@ mod tests {
         let event = ChangeEventBuilder::new()
             .op(Operation::Create)
             .source(source)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(event.id, "0/ABCDEF:123");
     }
@@ -226,7 +248,7 @@ mod tests {
             db: "db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: "0/0".into(),
+            lsn: Lsn("0/0".into()),
             tx_id: "0".into(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -235,7 +257,8 @@ mod tests {
         let event = ChangeEventBuilder::new()
             .op(Operation::Read)
             .source(source)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(event.id.starts_with("snap:public.users:"));
     }
@@ -246,7 +269,7 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: String::new(),
+            lsn: Lsn::default(),
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: None,
@@ -255,9 +278,9 @@ mod tests {
         let event = ChangeEventBuilder::new()
             .op(Operation::Read)
             .source(source)
-            .build();
+            .build()
+            .unwrap();
 
-        // When LSN is empty, fall back to a UUID
         assert!(!event.id.is_empty());
         assert!(!event.id.contains(':'));
     }
@@ -273,31 +296,58 @@ mod tests {
             .before(Some(before_val.clone()))
             .after(Some(after_val.clone()))
             .source(source)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(event.before, Some(before_val));
         assert_eq!(event.after, Some(after_val));
     }
 
     #[test]
-    fn test_builder_ts_ms_generated() {
+    fn test_builder_ts_ms_monotonic() {
         let source = SourceMetadata::default();
-        let before = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
 
+        let e1 = ChangeEventBuilder::new()
+            .op(Operation::Create)
+            .source(source.clone())
+            .build()
+            .unwrap();
+        let e2 = ChangeEventBuilder::new()
+            .op(Operation::Create)
+            .source(source)
+            .build()
+            .unwrap();
+
+        // ts_ms must be strictly increasing
+        assert!(
+            e2.ts_ms > e1.ts_ms,
+            "ts_ms not monotonic: {} then {}",
+            e1.ts_ms,
+            e2.ts_ms
+        );
+    }
+
+    #[test]
+    fn test_builder_missing_source_returns_error() {
+        let result = ChangeEventBuilder::new().op(Operation::Create).build();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("source metadata is required")
+        );
+    }
+
+    #[test]
+    fn test_builder_ts_ms_overridden_in_test() {
+        let source = SourceMetadata::default();
         let event = ChangeEventBuilder::new()
             .op(Operation::Create)
             .source(source)
-            .build();
-
-        let after = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        assert!(event.ts_ms >= before);
-        assert!(event.ts_ms <= after);
+            .ts_ms(42)
+            .build()
+            .unwrap();
+        assert_eq!(event.ts_ms, 42);
     }
 }

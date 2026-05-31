@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::error::TapError;
+
 /// Configuration for reconnection behaviour.
 ///
 /// Controls how many times a Postgres connection is retried and how long
@@ -20,7 +22,7 @@ use std::time::Duration;
 ///     jitter: true,
 /// };
 ///
-/// let delay = cfg.backoff(0);
+/// let delay = cfg.backoff(0).unwrap();
 /// assert!(delay.as_millis() >= 80);   // 100 - 20 %
 /// assert!(delay.as_millis() <= 120);  // 100 + 20 %
 /// ```
@@ -39,6 +41,8 @@ pub struct ReconnectConfig {
 impl ReconnectConfig {
     /// Returns the backoff [`Duration`] for the given attempt number.
     ///
+    /// Returns `None` when `attempt >= max_retries` (exhausted retries).
+    ///
     /// `attempt` is zero-indexed (the first retry is attempt 0, the
     /// second is attempt 1, etc.).
     ///
@@ -52,10 +56,12 @@ impl ReconnectConfig {
     /// else:      capped                    |
     /// ```
     ///
-    /// The jitter is deterministic per attempt number: the same
-    /// `ReconnectConfig` and same `attempt` always produce the same
-    /// value, which makes tests reproducible.
-    pub fn backoff(&self, attempt: u32) -> Duration {
+    /// The jitter is deterministic per attempt number and stable across
+    /// Rust versions (uses SplitMix64 internally).
+    pub fn backoff(&self, attempt: u32) -> Option<Duration> {
+        if attempt >= self.max_retries {
+            return None;
+        }
         let exponential = self
             .initial_backoff_ms
             .saturating_mul(2u64.saturating_pow(attempt));
@@ -64,24 +70,37 @@ impl ReconnectConfig {
         if self.jitter {
             let factor = Self::jitter_factor(attempt);
             let jittered = ((capped as f64) * (1.0 + factor)) as u64;
-            Duration::from_millis(jittered.min(self.max_backoff_ms))
+            Some(Duration::from_millis(jittered.min(self.max_backoff_ms)))
         } else {
-            Duration::from_millis(capped)
+            Some(Duration::from_millis(capped))
         }
     }
 
+    /// Returns a backoff or an error when retries are exhausted.
+    ///
+    /// Convenience wrapper that converts `None` into a `TapError`.
+    pub fn backoff_or_err(&self, attempt: u32) -> Result<Duration, TapError> {
+        self.backoff(attempt).ok_or_else(|| {
+            TapError::Config(format!(
+                "retries exhausted after {} attempt(s)",
+                self.max_retries
+            ))
+        })
+    }
+
     /// Deterministic pseudo-random factor in `[-0.2, +0.2]` derived from
-    /// `attempt`.  Uses [`std::hash::DefaultHasher`] so results are
-    /// consistent for the same input within the same process.
+    /// `attempt` using SplitMix64.
+    ///
+    /// Stable across Rust versions and platforms.
     fn jitter_factor(attempt: u32) -> f64 {
-        use std::hash::{Hash, Hasher};
+        // SplitMix64 hash — deterministic, cross-version stable
+        let mut z = attempt as u64;
+        z = z.wrapping_add(0x9e3779b97f4a7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^= z >> 31;
 
-        let mut hasher = std::hash::DefaultHasher::new();
-        attempt.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        // Map the full u64 range onto [-0.2, +0.2]
-        (hash as f64 / u64::MAX as f64) * 0.4 - 0.2
+        (z as f64 / u64::MAX as f64) * 0.4 - 0.2
     }
 }
 
@@ -109,14 +128,10 @@ mod tests {
             jitter: false,
         };
 
-        // attempt 0: 100 * 2^0 = 100
-        assert_eq!(cfg.backoff(0), Duration::from_millis(100));
-        // attempt 1: 100 * 2^1 = 200
-        assert_eq!(cfg.backoff(1), Duration::from_millis(200));
-        // attempt 2: 100 * 2^2 = 400
-        assert_eq!(cfg.backoff(2), Duration::from_millis(400));
-        // attempt 3: 100 * 2^3 = 800
-        assert_eq!(cfg.backoff(3), Duration::from_millis(800));
+        assert_eq!(cfg.backoff(0).unwrap(), Duration::from_millis(100));
+        assert_eq!(cfg.backoff(1).unwrap(), Duration::from_millis(200));
+        assert_eq!(cfg.backoff(2).unwrap(), Duration::from_millis(400));
+        assert_eq!(cfg.backoff(3).unwrap(), Duration::from_millis(800));
     }
 
     #[test]
@@ -128,10 +143,24 @@ mod tests {
             jitter: false,
         };
 
-        // attempt 2: 1000 * 4 = 4000, capped at 3000
-        assert_eq!(cfg.backoff(2), Duration::from_millis(3_000));
-        // Higher attempts also stay at the cap
-        assert_eq!(cfg.backoff(10), Duration::from_millis(3_000));
+        assert_eq!(cfg.backoff(2).unwrap(), Duration::from_millis(3_000));
+        assert_eq!(cfg.backoff(9).unwrap(), Duration::from_millis(3_000));
+    }
+
+    #[test]
+    fn test_backoff_exhausted_returns_none() {
+        let cfg = ReconnectConfig {
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 10_000,
+            jitter: false,
+        };
+
+        assert!(cfg.backoff(0).is_some());
+        assert!(cfg.backoff(1).is_some());
+        assert!(cfg.backoff(2).is_some());
+        assert!(cfg.backoff(3).is_none());
+        assert!(cfg.backoff(99).is_none());
     }
 
     #[test]
@@ -143,22 +172,29 @@ mod tests {
             jitter: true,
         };
 
-        // Attempt 0: base of 1000, jitter should stay in [800, 1200]
-        let d = cfg.backoff(0);
+        let d = cfg.backoff(0).unwrap();
         let ms = d.as_millis();
         assert!(
             ms >= 800 && ms <= 1200,
             "jitter out of range: {ms} (expected 800..1200)"
         );
 
-        // Multiple calls to the same attempt produce the same result
-        // (deterministic jitter)
+        // Deterministic jitter: same attempt → same value
         assert_eq!(cfg.backoff(0), cfg.backoff(0));
+
+        // Different attempts produce different jitter
+        let values: Vec<u128> = (0..cfg.max_retries)
+            .map(|a| cfg.backoff(a).unwrap().as_millis())
+            .collect();
+        let unique = values
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(unique > 1, "all backoff values were identical: {values:?}");
     }
 
     #[test]
     fn test_backoff_jitter_capped() {
-        // With a low max and high jitter, the value should still be capped
         let cfg = ReconnectConfig {
             max_retries: 5,
             initial_backoff_ms: 1_000,
@@ -166,7 +202,7 @@ mod tests {
             jitter: true,
         };
 
-        let d = cfg.backoff(2);
+        let d = cfg.backoff(2).unwrap();
         assert!(
             d.as_millis() <= 500,
             "jitter should not exceed max_backoff: {}",
@@ -183,13 +219,12 @@ mod tests {
             jitter: false,
         };
 
-        assert_eq!(cfg.backoff(0), Duration::from_millis(0));
-        assert_eq!(cfg.backoff(1), Duration::from_millis(0));
+        assert_eq!(cfg.backoff(0).unwrap(), Duration::from_millis(0));
+        assert_eq!(cfg.backoff(1).unwrap(), Duration::from_millis(0));
     }
 
     #[test]
     fn test_backoff_saturating_mul() {
-        // Very large initial * 2^attempt should not panic via overflow
         let cfg = ReconnectConfig {
             max_retries: 100,
             initial_backoff_ms: u64::MAX,
@@ -197,8 +232,27 @@ mod tests {
             jitter: false,
         };
 
-        // Should return the cap without panicking
-        let d = cfg.backoff(100);
-        assert_eq!(d, Duration::from_millis(u64::MAX));
+        assert_eq!(cfg.backoff(0).unwrap(), Duration::from_millis(u64::MAX));
+    }
+
+    #[test]
+    fn test_backoff_jitter_factor_range() {
+        // Jitter factor must stay within [-0.2, +0.2] for a range of attempts
+        for attempt in 0..100 {
+            let factor = ReconnectConfig::jitter_factor(attempt);
+            assert!(
+                factor >= -0.2 && factor <= 0.2,
+                "jitter_factor({attempt}) out of range: {factor}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconnect_defaults() {
+        let cfg = ReconnectConfig::default();
+        assert_eq!(cfg.max_retries, 10);
+        assert_eq!(cfg.initial_backoff_ms, 500);
+        assert_eq!(cfg.max_backoff_ms, 30_000);
+        assert!(cfg.jitter);
     }
 }

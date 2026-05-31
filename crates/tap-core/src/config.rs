@@ -6,6 +6,7 @@
 //! and structured logging.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::error::TapError;
 
@@ -52,7 +53,7 @@ use crate::error::TapError;
 /// format = "json"
 /// level = "info"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TapConfig {
     pub source: SourceConfig,
     pub sink: SinkConfig,
@@ -60,6 +61,19 @@ pub struct TapConfig {
     pub snapshot: SnapshotConfig,
     pub state: StateConfig,
     pub logging: LoggingConfig,
+}
+
+impl fmt::Debug for TapConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TapConfig")
+            .field("source", &self.source)
+            .field("sink", &self.sink)
+            .field("capture", &self.capture)
+            .field("snapshot", &self.snapshot)
+            .field("state", &self.state)
+            .field("logging", &self.logging)
+            .finish()
+    }
 }
 
 impl TapConfig {
@@ -71,13 +85,24 @@ impl TapConfig {
     /// [`TapError::Config`] if the TOML content is malformed.
     pub fn from_path(path: &str) -> Result<Self, TapError> {
         let content = std::fs::read_to_string(path)?;
-        tap_config_from_toml(&content)
+        let mut config = tap_config_from_toml(&content)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates all sub-configurations.
+    fn validate(&mut self) -> Result<(), TapError> {
+        self.source.validate()?;
+        Ok(())
     }
 }
 
 /// Parse a TOML string into a [`TapConfig`].
 fn tap_config_from_toml(content: &str) -> Result<TapConfig, TapError> {
-    toml::from_str(content).map_err(|e| TapError::Config(format!("Failed to parse config: {e}")))
+    toml::from_str(content).map_err(|e| {
+        // The error's Display already includes line/column position
+        TapError::Config(format!("Failed to parse config: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +110,7 @@ fn tap_config_from_toml(content: &str) -> Result<TapConfig, TapError> {
 // ---------------------------------------------------------------------------
 
 /// Postgres source connection and replication settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SourceConfig {
     /// Postgres server hostname.
@@ -110,6 +135,22 @@ pub struct SourceConfig {
     pub plugin: String,
 }
 
+impl fmt::Debug for SourceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourceConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("dbname", &self.dbname)
+            .field("user", &self.user)
+            .field("password", &"<REDACTED>")
+            .field("slot_name", &self.slot_name)
+            .field("publication", &self.publication)
+            .field("tables", &self.tables)
+            .field("plugin", &self.plugin)
+            .finish()
+    }
+}
+
 impl Default for SourceConfig {
     fn default() -> Self {
         Self {
@@ -122,6 +163,30 @@ impl Default for SourceConfig {
             publication: "tap_publication".into(),
             tables: Vec::new(),
             plugin: "pgoutput".into(),
+        }
+    }
+}
+
+impl SourceConfig {
+    /// Checks that all required fields are non-empty.
+    fn validate(&self) -> Result<(), TapError> {
+        let mut errors: Vec<String> = Vec::new();
+        if self.dbname.is_empty() {
+            errors.push("source.dbname is required".into());
+        }
+        if self.user.is_empty() {
+            errors.push("source.user is required".into());
+        }
+        if self.password.is_empty() {
+            errors.push("source.password is required".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TapError::Config(format!(
+                "config validation failed: {}",
+                errors.join("; ")
+            )))
         }
     }
 }
@@ -417,5 +482,107 @@ level = "info"
     fn test_config_from_path_invalid() {
         let result = TapConfig::from_path("/tmp/nonexistent/tap-config.toml");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_debug_redacts_password() {
+        let s = SourceConfig {
+            password: "s3cret".into(),
+            ..SourceConfig::default()
+        };
+        let debug_str = format!("{s:?}");
+        // The password value must NOT appear in debug output
+        assert!(
+            !debug_str.contains("s3cret"),
+            "password leaked: {debug_str}"
+        );
+        // Must show redaction marker instead
+        assert!(debug_str.contains("<REDACTED>"));
+    }
+
+    #[test]
+    fn test_config_validation_empty_dbname() {
+        let config = SourceConfig {
+            dbname: String::new(),
+            user: "u".into(),
+            password: "p".into(),
+            ..SourceConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("dbname"));
+    }
+
+    #[test]
+    fn test_config_validation_empty_user() {
+        let config = SourceConfig {
+            dbname: "d".into(),
+            user: String::new(),
+            password: "p".into(),
+            ..SourceConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("user"));
+    }
+
+    #[test]
+    fn test_config_validation_empty_password() {
+        let config = SourceConfig {
+            dbname: "d".into(),
+            user: "u".into(),
+            password: String::new(),
+            ..SourceConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("password"));
+    }
+
+    #[test]
+    fn test_config_validation_all_required_ok() {
+        let config = SourceConfig {
+            dbname: "d".into(),
+            user: "u".into(),
+            password: "p".into(),
+            ..SourceConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_from_path_rejects_missing_required() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_tap_invalid_config.toml");
+        let toml_str = r#"
+[source]
+host = "localhost"
+port = 5432
+user = "u"
+password = "p"
+
+[sink]
+host = "0.0.0.0"
+port = 8080
+
+[capture]
+snapshot = true
+
+[snapshot]
+batchSize = 1000
+numWorkers = 4
+
+[state]
+path = "state.db"
+
+[logging]
+format = "json"
+level = "info"
+"#;
+        std::fs::write(&path, toml_str).unwrap();
+
+        let result = TapConfig::from_path(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("dbname"), "expected 'dbname' in error: {err}");
     }
 }
