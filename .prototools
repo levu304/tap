@@ -1,0 +1,4 @@
+# proto version manager — https://moonrepo.dev/proto
+rust = "1.85.0"
+node = "22.5.0"
+pnpm = "9.15.0"

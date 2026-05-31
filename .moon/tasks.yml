@@ -1,0 +1,21 @@
+# Moon shared task templates
+# https://moonrepo.dev/docs/config/tasks
+
+tasks:
+  build:
+    command: cargo build
+    inputs:
+      - "src/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+  test:
+    command: cargo test
+    deps:
+      - build
+
+  lint:
+    command: cargo clippy --workspace -- -D warnings
+
+  fmt:
+    command: cargo fmt --all -- --check

@@ -1,5 +1,34 @@
-
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
+
+# Rust
+target/
+Cargo.lock
+
+# Node / npm / pnpm
+node_modules/
+*.node
+
+# Tap runtime state
+.tap/
+
+# Moon cache
+.moon/cache/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll

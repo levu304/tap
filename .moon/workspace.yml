@@ -1,0 +1,7 @@
+# Moon workspace configuration
+# https://moonrepo.dev/docs/config/workspace
+
+projects:
+  globs:
+    - "crates/*"
+    - "packages/*"

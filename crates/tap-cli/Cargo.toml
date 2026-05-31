@@ -1,0 +1,19 @@
+[package]
+name = "tap-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tap CLI — manage capture sessions, inspect schemas, run dev server"
+
+[dependencies]
+tap-core = { path = "../tap-core" }
+clap.workspace = true
+tokio.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
