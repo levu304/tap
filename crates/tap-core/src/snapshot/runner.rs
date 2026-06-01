@@ -260,9 +260,7 @@ impl SnapshotRunner {
             .await?;
 
         // Export the snapshot identifier
-        let snap_row = client
-            .query_one("SELECT pg_export_snapshot()", &[])
-            .await?;
+        let snap_row = client.query_one("SELECT pg_export_snapshot()", &[]).await?;
         let snapshot_id: String = snap_row.get(0);
 
         // Capture the WAL position at snapshot time
@@ -350,7 +348,10 @@ impl SnapshotRunner {
     ) -> Result<u64, TapError> {
         // ── Resume check ──────────────────────────────────────────────
         if self.is_table_completed(table)? {
-            info!("table {} snapshot already completed, skipping", table.qualified);
+            info!(
+                "table {} snapshot already completed, skipping",
+                table.qualified
+            );
             return self.completed_row_count(table);
         }
 
@@ -556,7 +557,7 @@ impl SnapshotRunner {
 /// Estimate the serialized byte size of a JSON value.
 /// Returns `None` when the size cannot be determined.
 fn estimate_row_size(value: &serde_json::Value) -> Option<usize> {
-        Some(value.to_string().len())
+    Some(value.to_string().len())
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +639,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join(":");
         let expected = format!("{expected_prefix}{parts}");
-        assert_eq!(expected, "snap:public.order_items:order_id=<val>:product_id=<val>");
+        assert_eq!(
+            expected,
+            "snap:public.order_items:order_id=<val>:product_id=<val>"
+        );
     }
 
     #[test]
@@ -754,10 +758,7 @@ mod tests {
     fn test_composite_pk_keyval_format() {
         let pk_cols = vec!["org_id".to_string(), "user_id".to_string()];
 
-        let keyvals: Vec<String> = pk_cols
-            .iter()
-            .map(|pk| format!("{}=<val>", pk))
-            .collect();
+        let keyvals: Vec<String> = pk_cols.iter().map(|pk| format!("{}=<val>", pk)).collect();
         let joined = keyvals.join(":");
 
         // Since we can't read from a real Row, we verify the format
@@ -798,19 +799,13 @@ mod tests {
         let large_row = json!({"data": large_data});
 
         let size = estimate_row_size(&large_row).unwrap();
-        assert!(
-            size > 1_048_576,
-            "expected size > 1 MB, got {size}"
-        );
+        assert!(size > 1_048_576, "expected size > 1 MB, got {size}");
     }
 
     #[test]
     fn test_small_row_no_warning() {
         let small_row = json!({"id": 1, "name": "test"});
         let size = estimate_row_size(&small_row).unwrap();
-        assert!(
-            size < 1_048_576,
-            "expected size < 1 MB, got {size}"
-        );
+        assert!(size < 1_048_576, "expected size < 1 MB, got {size}");
     }
 }
