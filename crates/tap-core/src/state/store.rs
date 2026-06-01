@@ -637,7 +637,9 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
         let lsn = Lsn::from_str("0/DEADBEEF").unwrap();
 
-        store.write_snapshot_progress("public.users", "snap_1", 500, &lsn);
+        store
+            .write_snapshot_progress("public.users", "snap_1", 500, &lsn)
+            .expect("write snap progress");
 
         let status = store
             .get_snapshot_status("public.users")
