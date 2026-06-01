@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tracing::info;
 
 use crate::config::StateConfig;
@@ -174,11 +174,11 @@ impl StateStore {
     ) -> Result<(), TapError> {
         let lsn_str = lsn.to_string();
         // Compute next sequence number
-        let sequence: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM offsets", [], |row| {
-                row.get(0)
-            })?;
+        let sequence: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM offsets",
+            [],
+            |row| row.get(0),
+        )?;
 
         self.conn.execute(
             "INSERT INTO offsets (committed_lsn, tx_id, ts_ms, sequence, is_final)
@@ -194,25 +194,23 @@ impl StateStore {
     pub fn read_last_offset(&self) -> Result<Option<OffsetRecord>, TapError> {
         // Prefer the latest final offset (resume from a clean checkpoint).
         // Fall back to the highest sequence overall.
-        let result = self
-            .conn
-            .query_row(
-                "SELECT committed_lsn, tx_id, ts_ms, sequence, is_final
+        let result = self.conn.query_row(
+            "SELECT committed_lsn, tx_id, ts_ms, sequence, is_final
                  FROM offsets
                  WHERE is_final = 1
                  ORDER BY sequence DESC
                  LIMIT 1",
-                [],
-                |row| {
-                    Ok(OffsetRecord {
-                        committed_lsn: row.get(0)?,
-                        tx_id: row.get(1)?,
-                        ts_ms: row.get::<_, i64>(2)? as u64,
-                        sequence: row.get(3)?,
-                        is_final: row.get::<_, i64>(4)? != 0,
-                    })
-                },
-            );
+            [],
+            |row| {
+                Ok(OffsetRecord {
+                    committed_lsn: row.get(0)?,
+                    tx_id: row.get(1)?,
+                    ts_ms: row.get::<_, i64>(2)? as u64,
+                    sequence: row.get(3)?,
+                    is_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        );
 
         match result {
             Ok(record) => Ok(Some(record)),
@@ -334,8 +332,9 @@ impl StateStore {
         primary_keys: &[String],
         schema_hash: &str,
     ) -> Result<(), TapError> {
-        let pk_json = serde_json::to_string(primary_keys)
-            .map_err(|e| TapError::StateCorruption(format!("failed to serialize primary_keys: {e}")))?;
+        let pk_json = serde_json::to_string(primary_keys).map_err(|e| {
+            TapError::StateCorruption(format!("failed to serialize primary_keys: {e}"))
+        })?;
 
         self.conn.execute(
             "INSERT INTO schema_cache (table_name, columns_json, primary_keys, schema_hash)
@@ -564,28 +563,13 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
 
         store
-            .write_offset(
-                &Lsn::from_str("0/11111111").unwrap(),
-                "tx_1",
-                1000,
-                false,
-            )
+            .write_offset(&Lsn::from_str("0/11111111").unwrap(), "tx_1", 1000, false)
             .expect("write offset 1");
         store
-            .write_offset(
-                &Lsn::from_str("0/22222222").unwrap(),
-                "tx_2",
-                2000,
-                false,
-            )
+            .write_offset(&Lsn::from_str("0/22222222").unwrap(), "tx_2", 2000, false)
             .expect("write offset 2");
         store
-            .write_offset(
-                &Lsn::from_str("0/33333333").unwrap(),
-                "tx_3",
-                3000,
-                true,
-            )
+            .write_offset(&Lsn::from_str("0/33333333").unwrap(), "tx_3", 3000, true)
             .expect("write offset 3");
 
         let record = store
@@ -611,20 +595,10 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
 
         store
-            .write_offset(
-                &Lsn::from_str("0/AAAAAAAA").unwrap(),
-                "tx_a",
-                1000,
-                false,
-            )
+            .write_offset(&Lsn::from_str("0/AAAAAAAA").unwrap(), "tx_a", 1000, false)
             .expect("write offset A");
         store
-            .write_offset(
-                &Lsn::from_str("0/BBBBBBBB").unwrap(),
-                "tx_b",
-                2000,
-                false,
-            )
+            .write_offset(&Lsn::from_str("0/BBBBBBBB").unwrap(), "tx_b", 2000, false)
             .expect("write offset B");
 
         // No is_final=1 offsets — should fall back to max sequence
@@ -663,8 +637,7 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
         let lsn = Lsn::from_str("0/DEADBEEF").unwrap();
 
-        store
-            .write_snapshot_progress("public.users", "snap_1", 500, &lsn);
+        store.write_snapshot_progress("public.users", "snap_1", 500, &lsn);
 
         let status = store
             .get_snapshot_status("public.users")
@@ -789,8 +762,7 @@ mod tests {
 
         // Open a second connection to corrupt the database
         {
-            let conn =
-                Connection::open(Path::new(&config.path)).expect("open raw for corruption");
+            let conn = Connection::open(Path::new(&config.path)).expect("open raw for corruption");
             // Write garbage into the file via raw bytes
             conn.execute_batch("PRAGMA journal_mode=DELETE").ok();
         }
@@ -837,19 +809,19 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
 
         // Key not found
-        assert!(store
-            .get_instance_info("nonexistent")
-            .expect("get missing")
-            .is_none());
+        assert!(
+            store
+                .get_instance_info("nonexistent")
+                .expect("get missing")
+                .is_none()
+        );
 
         // Set and get
         store
             .set_instance_info("hostname", "myserver")
             .expect("set hostname");
         assert_eq!(
-            store
-                .get_instance_info("hostname")
-                .expect("get hostname"),
+            store.get_instance_info("hostname").expect("get hostname"),
             Some("myserver".into())
         );
 
@@ -858,9 +830,7 @@ mod tests {
             .set_instance_info("hostname", "newserver")
             .expect("set hostname again");
         assert_eq!(
-            store
-                .get_instance_info("hostname")
-                .expect("get hostname"),
+            store.get_instance_info("hostname").expect("get hostname"),
             Some("newserver".into())
         );
 
@@ -930,9 +900,7 @@ mod tests {
             .prepare("SELECT lsn, tx_id, error_message FROM skipped_lsns")
             .unwrap();
         let results: Vec<(String, String, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
@@ -953,7 +921,9 @@ mod tests {
         let config = temp_config("clear_offsets");
         let store = StateStore::open(&config).expect("open store");
         let lsn = Lsn::from_str("0/C0CAC01A").unwrap();
-        store.write_offset(&lsn, "tx_clear", 5000, true).expect("write offset");
+        store
+            .write_offset(&lsn, "tx_clear", 5000, true)
+            .expect("write offset");
         assert!(store.read_last_offset().expect("read").is_some());
 
         store.clear_offsets().expect("clear offsets");

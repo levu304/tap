@@ -198,10 +198,7 @@ mod tests {
         ];
 
         for name in &expected {
-            assert!(
-                tables.contains(&name.to_string()),
-                "missing table: {name}"
-            );
+            assert!(tables.contains(&name.to_string()), "missing table: {name}");
         }
     }
 
