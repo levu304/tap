@@ -110,6 +110,17 @@ fn connection_string(config: &SourceConfig) -> String {
     )
 }
 
+/// Build a plain (non-replication) connection string from [`SourceConfig`].
+///
+/// Suitable for ordinary SQL queries (catalog lookups, table scans, snapshot
+/// operations).  Does **not** include the `--replication=database` option.
+fn connection_string_plain(config: &SourceConfig) -> String {
+    format!(
+        "host={} port={} dbname={} user={} password={}",
+        config.host, config.port, config.dbname, config.user, config.password,
+    )
+}
+
 /// Build a redacted version of the connection string for logging purposes.
 /// The password value is replaced with `<REDACTED>`.
 fn redacted_connection_string(config: &SourceConfig) -> String {
@@ -432,6 +443,76 @@ impl PgConnection {
 }
 
 // ---------------------------------------------------------------------------
+// Plain connection for snapshot operations
+// ---------------------------------------------------------------------------
+
+/// Connect to Postgres in plain (non-replication) mode.
+///
+/// Builds a connection string **without** the `--replication=database`
+/// option, making it suitable for ordinary SQL queries — catalog lookups,
+/// `pg_export_snapshot()`, `SELECT` scans, etc.
+///
+/// The snapshot engine uses two of these: a **keeper** that holds the
+/// exported snapshot transaction open, and a **worker** that pins its
+/// transactions to that snapshot.
+///
+/// # Errors
+///
+/// Returns [`TapError::PostgresConnectionRedacted`] if the connection
+/// fails (with the password redacted from the error message).
+pub async fn connect_plain(config: &SourceConfig) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), TapError> {
+    let conn_str = connection_string_plain(config);
+    let redacted = format!(
+        "host={} port={} dbname={} user={} password=<REDACTED>",
+        config.host, config.port, config.dbname, config.user,
+    );
+    info!("connecting to Postgres (plain): {redacted}");
+
+    let (client, join_handle) = match config.ssl_mode {
+        crate::config::SslMode::Disable => {
+            let (c, conn) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                .await
+                .map_err(|e| {
+                    TapError::PostgresConnectionRedacted(
+                        e.to_string().replace(&config.password, "<REDACTED>"),
+                    )
+                })?;
+            let jh = tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    tracing::error!("Postgres (plain) connection error: {e}");
+                }
+            });
+            (c, jh)
+        }
+        _ => {
+            let connector = native_tls::TlsConnector::builder().build().map_err(|e| {
+                TapError::PostgresConnectionRedacted(format!(
+                    "failed to build TLS connector: {e}"
+                ))
+            })?;
+            let (c, conn) = tokio_postgres::connect(
+                &conn_str,
+                postgres_native_tls::MakeTlsConnector::new(connector),
+            )
+            .await
+            .map_err(|e| {
+                TapError::PostgresConnectionRedacted(
+                    e.to_string().replace(&config.password, "<REDACTED>"),
+                )
+            })?;
+            let jh = tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    tracing::error!("Postgres (plain) connection error: {e}");
+                }
+            });
+            (c, jh)
+        }
+    };
+
+    Ok((client, join_handle))
+}
+
+// ---------------------------------------------------------------------------
 // ReplicationStream
 // ---------------------------------------------------------------------------
 
@@ -727,5 +808,46 @@ mod tests {
         };
         let conn_str = connection_string(&config);
         assert!(conn_str.contains("port=5432"));
+    }
+
+    // ── Plain connection strings ──────────────────────────────────────────
+
+    #[test]
+    fn test_plain_connection_string_omits_replication_option() {
+        let config = SourceConfig {
+            host: "pg.example.com".into(),
+            port: 5432,
+            dbname: "testdb".into(),
+            user: "replicator".into(),
+            password: "s3cret".into(),
+            ..SourceConfig::default()
+        };
+        let conn_str = connection_string_plain(&config);
+        assert!(conn_str.contains("host=pg.example.com"));
+        assert!(conn_str.contains("port=5432"));
+        assert!(conn_str.contains("dbname=testdb"));
+        assert!(conn_str.contains("user=replicator"));
+        assert!(conn_str.contains("password=s3cret"));
+        assert!(
+            !conn_str.contains("--replication"),
+            "plain connection should NOT contain --replication: {conn_str}"
+        );
+    }
+
+    #[test]
+    fn test_plain_connection_string_with_tls() {
+        let config = SourceConfig {
+            host: "pg.example.com".into(),
+            port: 5432,
+            dbname: "testdb".into(),
+            user: "replicator".into(),
+            password: "s3cret".into(),
+            ssl_mode: crate::config::SslMode::Require,
+            ..SourceConfig::default()
+        };
+        let conn_str = connection_string_plain(&config);
+        assert!(conn_str.contains("host=pg.example.com"));
+        assert!(conn_str.contains("password=s3cret"));
+        assert!(!conn_str.contains("--replication"));
     }
 }

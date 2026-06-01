@@ -94,6 +94,7 @@ impl TapConfig {
     /// Validates all sub-configurations.
     fn validate(&mut self) -> Result<(), TapError> {
         self.source.validate()?;
+        self.snapshot.validate()?;
         Ok(())
     }
 }
@@ -355,6 +356,32 @@ pub struct SnapshotConfig {
     /// Tables to include in the snapshot.  Empty means all captured tables.
     #[serde(default)]
     pub tables: Vec<String>,
+}
+
+impl SnapshotConfig {
+    /// Validate snapshot configuration.
+    pub fn validate(&self) -> Result<(), TapError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.batch_size == 0 {
+            errors.push("snapshot.batchSize must be > 0".into());
+        }
+
+        for (i, table) in self.tables.iter().enumerate() {
+            if let Err(e) = validate_identifier(table, &format!("snapshot.tables[{i}]")) {
+                errors.push(e.to_string());
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TapError::Config(format!(
+                "config validation failed: {}",
+                errors.join("; ")
+            )))
+        }
+    }
 }
 
 impl Default for SnapshotConfig {
@@ -673,5 +700,35 @@ level = "info"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("dbname"), "expected 'dbname' in error: {err}");
+    }
+
+    #[test]
+    fn test_snapshot_config_validates_batch_size_zero() {
+        let config = SnapshotConfig {
+            batch_size: 0,
+            ..SnapshotConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("batchSize"));
+    }
+
+    #[test]
+    fn test_snapshot_config_validates_tables() {
+        let config = SnapshotConfig {
+            tables: vec!["public.users".into(), "evil; DROP TABLE users; --".into()],
+            ..SnapshotConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_snapshot_config_validates_ok() {
+        let config = SnapshotConfig {
+            batch_size: 1000,
+            tables: vec!["public.users".into(), "public.orders".into()],
+            ..SnapshotConfig::default()
+        };
+        assert!(config.validate().is_ok());
     }
 }
