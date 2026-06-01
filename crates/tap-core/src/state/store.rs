@@ -95,8 +95,8 @@ impl StateStore {
     /// 1. Open or create the database file (creating parent dirs if needed).
     /// 2. Apply WAL-mode and safety pragmas.
     /// 3. Run `PRAGMA integrity_check`.
-    /// 4. Create a backup copy (`state.db.bak`) on the first open of the
-    ///    session.
+    /// 4. Create a backup copy (`state.db.bak`) if the database already
+    ///    existed (skipped for brand-new databases).
     /// 5. Run schema migrations to bring the database up to date.
     /// 6. Briefly acquire and release a `BEGIN EXCLUSIVE` transaction to
     ///    detect duplicate instances.
@@ -113,6 +113,10 @@ impl StateStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Check whether the DB file already exists — we only back up
+        // pre-existing databases, not freshly created ones.
+        let db_existed = path.exists();
 
         let conn = Connection::open(path)?;
 
@@ -135,8 +139,8 @@ impl StateStore {
             }
         }
 
-        // ---- Backup on first open this session (best-effort) ----
-        if path.exists() {
+        // ---- Backup pre-existing database (best-effort) ----
+        if db_existed {
             let bak = path.with_extension("db.bak");
             if let Err(e) = std::fs::copy(path, &bak) {
                 info!(from = %path.display(), to = %bak.display(), "backup skipped: {e}");
@@ -265,7 +269,7 @@ impl StateStore {
              VALUES (?1, ?2, ?3, 'in_progress', ?4)
              ON CONFLICT(table_name, snapshot_id) DO UPDATE SET
                rows_count = ?3,
-               status = 'in_progress'",
+               status = CASE WHEN status = 'completed' THEN status ELSE 'in_progress' END",
             params![table, snapshot_id, rows as i64, snapshot_lsn.to_string()],
         )?;
         Ok(())
@@ -358,19 +362,29 @@ impl StateStore {
              WHERE table_name = ?1",
             params![table],
             |row| {
-                let pks_str: String = row.get(2)?;
-                let primary_keys: Vec<String> = serde_json::from_str(&pks_str).unwrap_or_default();
-                Ok(SchemaRecord {
-                    table_name: row.get(0)?,
-                    columns_json: row.get(1)?,
-                    primary_keys,
-                    schema_hash: row.get(3)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
             },
         );
 
         match result {
-            Ok(record) => Ok(Some(record)),
+            Ok((table_name, columns_json, pks_str, schema_hash)) => {
+                let primary_keys: Vec<String> = serde_json::from_str(&pks_str).map_err(|e| {
+                    TapError::StateCorruption(format!(
+                        "corrupted primary_keys JSON for table '{table}': {e}"
+                    ))
+                })?;
+                Ok(Some(SchemaRecord {
+                    table_name,
+                    columns_json,
+                    primary_keys,
+                    schema_hash,
+                }))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
