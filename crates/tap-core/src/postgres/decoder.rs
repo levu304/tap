@@ -51,7 +51,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value as JsonValue;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::TapError;
 
@@ -126,6 +126,13 @@ pub trait WalDecoder: Send + Sync {
 
     /// Human-readable decoder name (e.g. `"pgoutput"`, `"wal2json"`).
     fn name(&self) -> &'static str;
+
+    /// Flush any pending events that have not yet been committed.
+    ///
+    /// May be called before dropping a decoder to recover in-flight events.
+    fn flush(&mut self) -> Vec<ChangeEvent> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,9 @@ pub trait WalDecoder: Send + Sync {
 pub struct PgoutputDecoder {
     /// Schema cache — relation OID → schema descriptor.
     schema_cache: HashMap<u32, RelationSchema>,
+
+    /// Source database name.
+    db_name: String,
 
     // ── Transaction state ────────────────────────────────────────────────
     /// LSN of the current transaction (from `Begin`).
@@ -170,10 +180,14 @@ struct PendingEvent {
 }
 
 impl PgoutputDecoder {
-    /// Create a new decoder with an empty schema cache.
-    pub fn new() -> Self {
+    /// Maximum number of pending events allowed per transaction.
+    const MAX_EVENTS_PER_TXN: usize = 10_000;
+
+    /// Create a new decoder for the given database with an empty schema cache.
+    pub fn new(db_name: impl Into<String>) -> Self {
         Self {
             schema_cache: HashMap::new(),
+            db_name: db_name.into(),
             current_lsn: None,
             current_tx_id: None,
             current_ts_ms: None,
@@ -237,7 +251,13 @@ impl PgoutputDecoder {
         self.current_lsn = Some(PgLsn::from_u64(raw_lsn));
         self.current_tx_id = Some(xid.to_string());
         self.current_ts_ms = Some(pg_timestamp_to_unix_ms(commit_time_us));
-        self.pending_events.clear();
+        if !self.pending_events.is_empty() {
+            warn!(
+                "discarding {} uncommitted events on new Begin (possible data loss)",
+                self.pending_events.len()
+            );
+            self.pending_events.clear();
+        }
 
         Ok(())
     }
@@ -262,6 +282,12 @@ impl PgoutputDecoder {
         let schema = self.lookup_schema(relation_id)?;
         let values = self.parse_tuple_data(buf, offset, &schema.columns)?;
 
+        if self.pending_events.len() >= Self::MAX_EVENTS_PER_TXN {
+            return Err(TapError::Decode(format!(
+                "transaction exceeds maximum of {} events",
+                Self::MAX_EVENTS_PER_TXN
+            )));
+        }
         self.pending_events.push(PendingEvent {
             op: Operation::Create,
             before: None,
@@ -305,6 +331,12 @@ impl PgoutputDecoder {
             None
         };
 
+        if self.pending_events.len() >= Self::MAX_EVENTS_PER_TXN {
+            return Err(TapError::Decode(format!(
+                "transaction exceeds maximum of {} events",
+                Self::MAX_EVENTS_PER_TXN
+            )));
+        }
         self.pending_events.push(PendingEvent {
             op: Operation::Update,
             before: old_values,
@@ -336,6 +368,12 @@ impl PgoutputDecoder {
 
         let old_values = self.parse_tuple_data(buf, offset, &schema.columns)?;
 
+        if self.pending_events.len() >= Self::MAX_EVENTS_PER_TXN {
+            return Err(TapError::Decode(format!(
+                "transaction exceeds maximum of {} events",
+                Self::MAX_EVENTS_PER_TXN
+            )));
+        }
         self.pending_events.push(PendingEvent {
             op: Operation::Delete,
             before: Some(old_values),
@@ -364,13 +402,16 @@ impl PgoutputDecoder {
         let lsn_display = commit_lsn.to_string();
         let event_lsn = EventLsn(lsn_display);
 
-        let tx_id = self.current_tx_id.clone().unwrap_or_default();
+        let tx_id = self
+            .current_tx_id
+            .clone()
+            .ok_or_else(|| TapError::Decode("Commit received without prior Begin".into()))?;
 
         let mut events = Vec::with_capacity(self.pending_events.len());
 
-        for pending in self.pending_events.drain(..) {
+        for (idx, pending) in self.pending_events.drain(..).enumerate() {
             let source = SourceMetadata {
-                db: String::new(),
+                db: self.db_name.clone(),
                 schema: pending.schema,
                 table: pending.table,
                 lsn: event_lsn.clone(),
@@ -379,7 +420,7 @@ impl PgoutputDecoder {
                 snapshot: None,
             };
 
-            let id = format!("{}:{}", event_lsn, tx_id);
+            let id = format!("{}:{}:{}", event_lsn, tx_id, idx);
 
             events.push(ChangeEvent {
                 op: pending.op,
@@ -412,7 +453,13 @@ impl PgoutputDecoder {
         let schema = read_cstring(buf, offset)?;
         let table = read_cstring(buf, offset)?;
         let _replica_identity = read_i8(buf, offset)?;
-        let ncols = read_i16(buf, offset)? as usize;
+        let ncols_raw = read_i16(buf, offset)?;
+        if ncols_raw < 0 {
+            return Err(TapError::Decode(format!(
+                "negative column count in Relation: {ncols_raw}"
+            )));
+        }
+        let ncols = ncols_raw as usize;
 
         let mut columns = Vec::with_capacity(ncols);
         for _ in 0..ncols {
@@ -465,7 +512,13 @@ impl PgoutputDecoder {
 
     /// Format: `'t' | Int32 nrels | Int32 relids[nrels] | Byte1 options` — skip.
     fn skip_truncate(&mut self, buf: &[u8], offset: &mut usize) -> Result<(), TapError> {
-        let nrels = read_i32(buf, offset)? as usize;
+        let nrels_raw = read_i32(buf, offset)?;
+        if nrels_raw < 0 {
+            return Err(TapError::Decode(format!(
+                "negative relation count in Truncate: {nrels_raw}"
+            )));
+        }
+        let nrels = nrels_raw as usize;
         for _ in 0..nrels {
             let _relid = read_i32(buf, offset)?;
         }
@@ -494,7 +547,13 @@ impl PgoutputDecoder {
         offset: &mut usize,
         columns: &[ColumnInfo],
     ) -> Result<JsonValue, TapError> {
-        let ncols = read_i16(buf, offset)? as usize;
+        let ncols_raw = read_i16(buf, offset)?;
+        if ncols_raw < 0 {
+            return Err(TapError::Decode(format!(
+                "negative column count in TupleData: {ncols_raw}"
+            )));
+        }
+        let ncols = ncols_raw as usize;
 
         // pgoutput may send fewer columns than the Relation schema describes
         // (e.g. for TOAST'd columns) — we only iterate over what's actually
@@ -550,7 +609,7 @@ impl PgoutputDecoder {
 
 impl Default for PgoutputDecoder {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
@@ -562,6 +621,42 @@ impl WalDecoder for PgoutputDecoder {
 
     fn name(&self) -> &'static str {
         "pgoutput"
+    }
+
+    fn flush(&mut self) -> Vec<ChangeEvent> {
+        let events: Vec<ChangeEvent> = self
+            .pending_events
+            .drain(..)
+            .map(|pending| {
+                let source = SourceMetadata {
+                    db: self.db_name.clone(),
+                    schema: pending.schema,
+                    table: pending.table,
+                    lsn: EventLsn(
+                        self.current_lsn
+                            .map(|l| l.to_string())
+                            .unwrap_or_default(),
+                    ),
+                    tx_id: self.current_tx_id.clone().unwrap_or_default(),
+                    ts_ms: self.current_ts_ms.unwrap_or(0),
+                    snapshot: None,
+                };
+                let ts_ms = source.ts_ms;
+                let id = format!("{}:{}:flush", source.lsn, source.tx_id);
+                ChangeEvent {
+                    op: pending.op,
+                    before: pending.before,
+                    after: pending.after,
+                    source,
+                    ts_ms,
+                    id,
+                }
+            })
+            .collect();
+        self.current_lsn = None;
+        self.current_tx_id = None;
+        self.current_ts_ms = None;
+        events
     }
 }
 
@@ -582,7 +677,19 @@ impl WalDecoder for PgoutputDecoder {
 ///   and deletes (not full row images).
 /// * There is no schema cache — schema and table names are provided
 ///   inline in each change entry.
-pub struct Wal2JsonDecoder;
+pub struct Wal2JsonDecoder {
+    /// Source database name.
+    db_name: String,
+}
+
+impl Wal2JsonDecoder {
+    /// Create a new decoder for the given database.
+    pub fn new(db_name: impl Into<String>) -> Self {
+        Self {
+            db_name: db_name.into(),
+        }
+    }
+}
 
 impl WalDecoder for Wal2JsonDecoder {
     fn decode(&mut self, message: &[u8]) -> Result<Vec<ChangeEvent>, TapError> {
@@ -664,7 +771,7 @@ impl WalDecoder for Wal2JsonDecoder {
             // per-event LSNs, so we use an empty string.
             let event_lsn = EventLsn(String::new());
             let source = SourceMetadata {
-                db: String::new(),
+                db: self.db_name.clone(),
                 schema,
                 table: table.to_string(),
                 lsn: event_lsn.clone(),
@@ -712,10 +819,10 @@ impl WalDecoder for Wal2JsonDecoder {
 /// # Errors
 ///
 /// Returns [`TapError::Config`] if the plugin name is not recognised.
-pub fn create_decoder(plugin: &str) -> Result<Box<dyn WalDecoder>, TapError> {
+pub fn create_decoder(plugin: &str, db_name: &str) -> Result<Box<dyn WalDecoder>, TapError> {
     match plugin {
-        "pgoutput" => Ok(Box::new(PgoutputDecoder::new())),
-        "wal2json" => Ok(Box::new(Wal2JsonDecoder)),
+        "pgoutput" => Ok(Box::new(PgoutputDecoder::new(db_name))),
+        "wal2json" => Ok(Box::new(Wal2JsonDecoder::new(db_name))),
         other => Err(TapError::Config(format!(
             "unknown replication plugin '{other}': expected 'pgoutput' or 'wal2json'"
         ))),
@@ -1175,7 +1282,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_insert() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let lsn = 0x16B37428u64;
         let xid = 12345u32;
@@ -1223,7 +1330,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_update() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let msg = build_transaction(
             0x100,
@@ -1263,7 +1370,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_delete() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let msg = build_transaction(
             0x300,
@@ -1296,7 +1403,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_begin_commit() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let msg = build_transaction(
             0x500,
@@ -1319,7 +1426,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_relation_cache() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // Send relation first, then a transaction
         let rel = build_relation(5, "public", "cache_test", &[("col1", 23, -1)]);
@@ -1350,7 +1457,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_malformed() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // Truncated message — single 'b' with no payload
         let result = decoder.decode(b"b");
@@ -1359,7 +1466,7 @@ mod tests {
         assert!(err.to_string().contains("unexpected end of data"));
 
         // Totally garbage bytes — unknown type
-        let mut decoder2 = PgoutputDecoder::new();
+        let mut decoder2 = PgoutputDecoder::new("");
         let result = decoder2.decode(&[0xFF, 0x01, 0x02]);
         // Unknown type simply returns empty vec
         assert!(result.is_ok(), "unknown type should not panic");
@@ -1370,7 +1477,7 @@ mod tests {
 
     #[test]
     fn test_decode_pgoutput_unknown_type_skipped() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // 'y' (Type) message — known-ignorable
         let mut msg = vec![b'y', 0, 0, 0, 10]; // type oid=10
@@ -1394,7 +1501,7 @@ mod tests {
 
     #[test]
     fn test_multi_event_transaction() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let msg = build_transaction(
             0x50,
@@ -1475,7 +1582,7 @@ mod tests {
 
     #[test]
     fn test_pgoutput_parse_tuple_data() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // Register a schema with mixed types
         let rel = build_relation(
@@ -1521,7 +1628,7 @@ mod tests {
 
     #[test]
     fn test_decode_wal2json_insert() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
 
         let json = r#"{
             "xid": 123,
@@ -1556,7 +1663,7 @@ mod tests {
 
     #[test]
     fn test_decode_wal2json_update() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
 
         let json = r#"{
             "xid": 456,
@@ -1600,7 +1707,7 @@ mod tests {
 
     #[test]
     fn test_decode_wal2json_delete() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
 
         let json = r#"{
             "xid": 789,
@@ -1635,13 +1742,13 @@ mod tests {
 
     #[test]
     fn test_create_decoder() {
-        let pg = create_decoder("pgoutput").unwrap();
+        let pg = create_decoder("pgoutput", "test_db").unwrap();
         assert_eq!(pg.name(), "pgoutput");
 
-        let w2j = create_decoder("wal2json").unwrap();
+        let w2j = create_decoder("wal2json", "test_db").unwrap();
         assert_eq!(w2j.name(), "wal2json");
 
-        match create_decoder("unknown") {
+        match create_decoder("unknown", "") {
             Err(e) => assert!(e.to_string().contains("unknown replication plugin")),
             Ok(_) => panic!("expected error for unknown plugin"),
         }
@@ -1651,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_decode_empty_buffer() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
         let events = decoder.decode(b"").unwrap();
         assert!(events.is_empty());
     }
@@ -1660,7 +1767,7 @@ mod tests {
 
     #[test]
     fn test_schema_cache_persists_across_decodes() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // Send relation in first call
         let rel = build_relation(99, "public", "persist_test", &[("x", 23, -1)]);
@@ -1685,7 +1792,7 @@ mod tests {
 
     #[test]
     fn test_relation_only_message() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let rel = build_relation(42, "public", "just_schema", &[("a", 25, -1)]);
         let events = decoder.decode(&rel).unwrap();
@@ -1696,7 +1803,7 @@ mod tests {
 
     #[test]
     fn test_dml_without_relation_errors() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         let msg = build_transaction(
             0x10,
@@ -1721,7 +1828,7 @@ mod tests {
 
     #[test]
     fn test_wal2json_unknown_kind_skipped() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
 
         let json = r#"{
             "xid": 1,
@@ -1815,7 +1922,7 @@ mod tests {
 
     #[test]
     fn test_skip_truncate_and_origin() {
-        let mut decoder = PgoutputDecoder::new();
+        let mut decoder = PgoutputDecoder::new("");
 
         // Build a message with 't' (Truncate), 'o' (Origin), and a valid txn
         let mut msg = Vec::new();
@@ -1849,7 +1956,7 @@ mod tests {
 
     #[test]
     fn test_wal2json_invalid_json() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
         let result = decoder.decode(b"not valid json");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("parse error"));
@@ -1859,7 +1966,7 @@ mod tests {
 
     #[test]
     fn test_wal2json_missing_change() {
-        let mut decoder = Wal2JsonDecoder;
+        let mut decoder = Wal2JsonDecoder::new("");
         let result = decoder.decode(b"{}");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'change'"));
