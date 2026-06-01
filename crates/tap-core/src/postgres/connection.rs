@@ -460,7 +460,9 @@ impl PgConnection {
 ///
 /// Returns [`TapError::PostgresConnectionRedacted`] if the connection
 /// fails (with the password redacted from the error message).
-pub async fn connect_plain(config: &SourceConfig) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), TapError> {
+pub async fn connect_plain(
+    config: &SourceConfig,
+) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), TapError> {
     let conn_str = connection_string_plain(config);
     let redacted = format!(
         "host={} port={} dbname={} user={} password=<REDACTED>",
@@ -486,9 +488,7 @@ pub async fn connect_plain(config: &SourceConfig) -> Result<(tokio_postgres::Cli
         }
         _ => {
             let connector = native_tls::TlsConnector::builder().build().map_err(|e| {
-                TapError::PostgresConnectionRedacted(format!(
-                    "failed to build TLS connector: {e}"
-                ))
+                TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
             })?;
             let (c, conn) = tokio_postgres::connect(
                 &conn_str,

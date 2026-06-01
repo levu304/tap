@@ -69,7 +69,11 @@ fn quote_ident(name: &str) -> String {
 
 /// Build a safely-quoted `schema.table` for use in SQL.
 fn qualified_sql(table: &TableInfo) -> String {
-    format!("{}.{}", quote_ident(&table.schema), quote_ident(&table.name))
+    format!(
+        "{}.{}",
+        quote_ident(&table.schema),
+        quote_ident(&table.name)
+    )
 }
 
 /// Split a `schema.table` string into its components.
@@ -319,7 +323,10 @@ impl SnapshotRunner {
     /// connection (see [`run`](Self::run)).
     async fn export_snapshot(&self) -> Result<(String, Lsn), TapError> {
         // Export the snapshot identifier
-        let snap_row = self.keeper.query_one("SELECT pg_export_snapshot()", &[]).await?;
+        let snap_row = self
+            .keeper
+            .query_one("SELECT pg_export_snapshot()", &[])
+            .await?;
         let snapshot_id: String = snap_row.get(0);
 
         // Capture the WAL position at snapshot time
@@ -359,10 +366,7 @@ impl SnapshotRunner {
         // Use a simple catalog query to get publication tables.
         let pub_name = self
             .worker
-            .query_one(
-                "SELECT pubname || '' FROM pg_publication LIMIT 1",
-                &[],
-            )
+            .query_one("SELECT pubname || '' FROM pg_publication LIMIT 1", &[])
             .await
             .map(|r| {
                 let s: String = r.get(0);
@@ -520,14 +524,20 @@ impl SnapshotRunner {
         // ── Final checkpoint  ─────────────────────────────────────────
         {
             let state = self.state.lock().await;
-            state.write_snapshot_progress(&table.qualified, snapshot_id, rows_done, snapshot_lsn)?;
+            state.write_snapshot_progress(
+                &table.qualified,
+                snapshot_id,
+                rows_done,
+                snapshot_lsn,
+            )?;
         }
 
         // Commit the table transaction (auto-rollback on Drop if we Err)
         txn.commit().await?;
 
         // Mark completed
-        self.mark_table_complete(table, snapshot_id, rows_done).await?;
+        self.mark_table_complete(table, snapshot_id, rows_done)
+            .await?;
 
         info!(
             table = %table.qualified,
