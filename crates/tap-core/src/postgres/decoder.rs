@@ -632,11 +632,7 @@ impl WalDecoder for PgoutputDecoder {
                     db: self.db_name.clone(),
                     schema: pending.schema,
                     table: pending.table,
-                    lsn: EventLsn(
-                        self.current_lsn
-                            .map(|l| l.to_string())
-                            .unwrap_or_default(),
-                    ),
+                    lsn: EventLsn(self.current_lsn.map(|l| l.to_string()).unwrap_or_default()),
                     tx_id: self.current_tx_id.clone().unwrap_or_default(),
                     ts_ms: self.current_ts_ms.unwrap_or(0),
                     snapshot: None,
