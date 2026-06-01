@@ -59,7 +59,7 @@ impl FromStr for Lsn {
             .map_err(|e| TapError::Decode(format!("invalid LSN high part '{}': {e}", parts[0])))?;
         let low = u32::from_str_radix(parts[1], 16)
             .map_err(|e| TapError::Decode(format!("invalid LSN low part '{}': {e}", parts[1])))?;
-        Ok(Lsn((high as u64) << 32 | low as u64))
+        Ok(Lsn(((high as u64) << 32) | low as u64))
     }
 }
 
