@@ -13,7 +13,7 @@
 pub mod connection;
 pub mod decoder;
 
-pub use connection::{Lsn, PgConnection, ReplicationStream};
+pub use connection::{Lsn, PgConnection, ReplicationStream, connect_plain};
 pub use decoder::{
     ColumnInfo, PgoutputDecoder, RelationSchema, Wal2JsonDecoder, WalDecoder, create_decoder,
 };
