@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 use crate::error::TapError;
 
@@ -109,6 +110,50 @@ fn tap_config_from_toml(content: &str) -> Result<TapConfig, TapError> {
 // Source
 // ---------------------------------------------------------------------------
 
+/// Whether and how to encrypt the Postgres connection with TLS.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SslMode {
+    /// Do not use TLS (default).  Credentials and data are sent in cleartext.
+    #[default]
+    Disable,
+    /// Require a TLS connection.  The server certificate is not verified.
+    Require,
+    /// Require TLS and verify the server certificate against the system CA
+    /// store.
+    VerifyCa,
+    /// Require TLS, verify the server certificate, and verify the hostname
+    /// matches.
+    VerifyFull,
+}
+
+impl fmt::Display for SslMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disable => write!(f, "disable"),
+            Self::Require => write!(f, "require"),
+            Self::VerifyCa => write!(f, "verify-ca"),
+            Self::VerifyFull => write!(f, "verify-full"),
+        }
+    }
+}
+
+impl FromStr for SslMode {
+    type Err = TapError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "disable" => Ok(Self::Disable),
+            "require" => Ok(Self::Require),
+            "verify-ca" => Ok(Self::VerifyCa),
+            "verify-full" => Ok(Self::VerifyFull),
+            _ => Err(TapError::Config(format!(
+                "invalid ssl_mode '{s}': expected disable, require, verify-ca, or verify-full"
+            ))),
+        }
+    }
+}
+
 /// Postgres source connection and replication settings.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -133,6 +178,9 @@ pub struct SourceConfig {
     pub tables: Vec<String>,
     /// Output plugin (`pgoutput` for Postgres 10+).
     pub plugin: String,
+    /// TLS encryption mode for the Postgres connection.
+    #[serde(default)]
+    pub ssl_mode: SslMode,
 }
 
 impl fmt::Debug for SourceConfig {
@@ -147,6 +195,7 @@ impl fmt::Debug for SourceConfig {
             .field("publication", &self.publication)
             .field("tables", &self.tables)
             .field("plugin", &self.plugin)
+            .field("ssl_mode", &self.ssl_mode)
             .finish()
     }
 }
@@ -163,13 +212,36 @@ impl Default for SourceConfig {
             publication: "tap_publication".into(),
             tables: Vec::new(),
             plugin: "pgoutput".into(),
+            ssl_mode: SslMode::Disable,
         }
     }
 }
 
+/// Validate a Postgres identifier for safe use in DDL.
+///
+/// Only allows alphanumeric characters, underscores, and dots (for
+/// schema-qualified names like `"public.users"`).  Returns an error if
+/// the identifier is empty or contains disallowed characters.
+pub fn validate_identifier(name: &str, field_name: &str) -> Result<(), TapError> {
+    if name.is_empty() {
+        return Err(TapError::Config(format!("{field_name} must not be empty")));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    {
+        return Err(TapError::Config(format!(
+            "{field_name} '{name}' contains invalid characters: \
+             only alphanumeric, underscore, and dot are allowed"
+        )));
+    }
+    Ok(())
+}
+
 impl SourceConfig {
-    /// Checks that all required fields are non-empty.
-    fn validate(&self) -> Result<(), TapError> {
+    /// Checks that all required fields are non-empty and validates
+    /// replication identifiers.
+    pub fn validate(&self) -> Result<(), TapError> {
         let mut errors: Vec<String> = Vec::new();
         if self.dbname.is_empty() {
             errors.push("source.dbname is required".into());
@@ -180,6 +252,23 @@ impl SourceConfig {
         if self.password.is_empty() {
             errors.push("source.password is required".into());
         }
+
+        // Validate replication identifiers (alphanumeric + underscore + dot)
+        if let Err(e) = validate_identifier(&self.slot_name, "source.slotName") {
+            errors.push(e.to_string());
+        }
+        if let Err(e) = validate_identifier(&self.publication, "source.publication") {
+            errors.push(e.to_string());
+        }
+        for (i, table) in self.tables.iter().enumerate() {
+            if let Err(e) = validate_identifier(table, &format!("source.tables[{i}]")) {
+                errors.push(e.to_string());
+            }
+        }
+        if let Err(e) = validate_identifier(&self.plugin, "source.plugin") {
+            errors.push(e.to_string());
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {

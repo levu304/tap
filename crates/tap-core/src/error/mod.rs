@@ -26,8 +26,20 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum TapError {
     /// Error from the Postgres wire protocol or replication connection.
+    ///
+    /// The inner error may include the connection string in its `Display`
+    /// output on some variants (e.g., authentication failures).  Use
+    /// [`TapError::PostgresConnectionRedacted`] at connect sites where
+    /// the connection string may contain secrets.
     #[error("Postgres connection error: {0}")]
     PostgresConnection(#[from] tokio_postgres::Error),
+
+    /// Postgres connection error with credentials redacted from the message.
+    ///
+    /// Used at connect sites where the `tokio_postgres::Error` display may
+    /// include the connection string with password.
+    #[error("Postgres connection error (details redacted)")]
+    PostgresConnectionRedacted(String),
 
     /// Error from the SQLite state-store backend.
     #[error("SQLite error: {0}")]

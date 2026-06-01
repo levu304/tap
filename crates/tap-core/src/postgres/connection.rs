@@ -34,15 +34,25 @@ use crate::{config::SourceConfig, error::TapError};
 /// use std::str::FromStr;
 ///
 /// let lsn = Lsn::from_str("0/16B37428").unwrap();
-/// assert_eq!(lsn, Lsn(0x16B37428));
+/// assert_eq!(lsn, Lsn::from_u64(0x16B37428));
 /// assert_eq!(lsn.to_string(), "0/16B37428");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Lsn(pub u64);
+pub struct Lsn(u64);
 
 impl Lsn {
     /// Zero LSN constant, representing the beginning of the WAL.
     pub const ZERO: Lsn = Lsn(0);
+
+    /// Construct an [`Lsn`] from a raw `u64` value.
+    pub fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the raw `u64` value.
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
 }
 
 impl FromStr for Lsn {
@@ -115,45 +125,85 @@ fn redacted_connection_string(config: &SourceConfig) -> String {
 
 /// A connection to a Postgres database configured for logical replication.
 ///
-/// Wraps a `tokio_postgres::Client` and the [`SourceConfig`] that was used
-/// to create it.  Provides methods for managing replication slots,
-/// publications, and streaming WAL data.
+/// Wraps a `tokio_postgres::Client`, the [`SourceConfig`] that was used
+/// to create it, and a join handle for the background connection handler.
+/// Provides methods for managing replication slots, publications, and
+/// streaming WAL data.
 pub struct PgConnection {
     /// The underlying tokio-postgres client.
     client: tokio_postgres::Client,
     /// The configuration used to establish the connection.
     config: SourceConfig,
+    /// Join handle for the background connection handler task.  Used by
+    /// [`close()`](Self::close) to wait for clean shutdown and surface any
+    /// panics that may have occurred.
+    join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PgConnection {
     /// Connect to Postgres in replication mode.
     ///
     /// Builds a connection string from the provided config, connects via
-    /// `tokio_postgres::connect()`, spawns the background connection
-    /// handler, and returns a [`PgConnection`] ready for replication
-    /// operations.
+    /// `tokio_postgres::connect()` using the configured TLS mode
+    /// ([`SslMode`]), spawns the background connection handler, and returns
+    /// a [`PgConnection`] ready for replication operations.
     ///
     /// The connection string includes `options=--replication=database` to
     /// enable logical replication mode.
     ///
     /// # Errors
     ///
-    /// Returns [`TapError::PostgresConnection`] if the connection fails.
+    /// Returns [`TapError::PostgresConnectionRedacted`] if the connection
+    /// fails (with the password redacted from the error message).
     pub async fn connect(config: &SourceConfig) -> Result<Self, TapError> {
         let conn_str = connection_string(config);
         let redacted = redacted_connection_string(config);
         info!("connecting to Postgres: {redacted}");
 
-        let (client, connection) =
-            tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await?;
-
-        // Spawn the connection handler in the background so it can process
-        // messages and keep the connection alive.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::error!("Postgres connection error: {e}");
+        // tokio-postgres 0.7 uses a generic `Connection<S>` parameterised
+        // by the TLS stream type, so each TLS backend produces a different
+        // `Connection` type.  We branch on `ssl_mode` to keep the concrete
+        // type uniform within each arm.
+        let (client, join_handle) = match config.ssl_mode {
+            crate::config::SslMode::Disable => {
+                let (c, conn) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                    .await
+                    .map_err(|e| {
+                        TapError::PostgresConnectionRedacted(
+                            e.to_string().replace(&config.password, "<REDACTED>"),
+                        )
+                    })?;
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = conn.await {
+                        tracing::error!("Postgres connection error: {e}");
+                    }
+                });
+                (c, jh)
             }
-        });
+            _ => {
+                let connector = native_tls::TlsConnector::builder().build().map_err(|e| {
+                    TapError::PostgresConnectionRedacted(format!(
+                        "failed to build TLS connector: {e}"
+                    ))
+                })?;
+                let (c, conn) = tokio_postgres::connect(
+                    &conn_str,
+                    postgres_native_tls::MakeTlsConnector::new(connector),
+                )
+                .await
+                .map_err(|e| {
+                    TapError::PostgresConnectionRedacted(
+                        e.to_string().replace(&config.password, "<REDACTED>"),
+                    )
+                })?;
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = conn.await {
+                        tracing::error!("Postgres connection error: {e}");
+                    }
+                });
+                (c, jh)
+            }
+        };
 
         info!(
             "connected to Postgres (host={}, dbname={})",
@@ -163,6 +213,7 @@ impl PgConnection {
         Ok(Self {
             client,
             config: config.clone(),
+            join_handle: Some(join_handle),
         })
     }
 
@@ -186,11 +237,7 @@ impl PgConnection {
         let slot_name = &self.config.slot_name;
 
         // Validate slot name: alphanumeric + underscore only
-        if slot_name.is_empty() || !slot_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Err(TapError::Config(format!(
-                "invalid slot name '{slot_name}': only alphanumeric and underscore characters are allowed"
-            )));
-        }
+        crate::config::validate_identifier(slot_name, "slot_name")?;
 
         // Check if slot already exists
         let rows = self
@@ -202,7 +249,16 @@ impl PgConnection {
             .await?;
 
         if let Some(row) = rows.first() {
-            let lsn_str: String = row.get(1);
+            let lsn_str: Option<String> = row.try_get(1).map_err(|e| {
+                TapError::Decode(format!(
+                    "failed to read confirmed_flush_lsn for slot '{slot_name}': {e}"
+                ))
+            })?;
+            let lsn_str = lsn_str.ok_or_else(|| {
+                TapError::Decode(format!(
+                    "confirmed_flush_lsn is NULL for existing slot '{slot_name}'"
+                ))
+            })?;
             let lsn = Lsn::from_str(&lsn_str)?;
             info!("found existing replication slot '{slot_name}' at LSN {lsn}");
             return Ok(lsn);
@@ -231,6 +287,12 @@ impl PgConnection {
     pub async fn ensure_publication(&self) -> Result<(), TapError> {
         let pub_name = &self.config.publication;
         let tables = &self.config.tables;
+
+        // Validate publication name and table names before building SQL
+        crate::config::validate_identifier(pub_name, "publication")?;
+        for (i, table) in tables.iter().enumerate() {
+            crate::config::validate_identifier(table, &format!("tables[{i}]"))?;
+        }
 
         // Check if publication already exists
         let rows = self
@@ -265,15 +327,16 @@ impl PgConnection {
         Ok(())
     }
 
-    /// Validate that all tables in the provided list exist in the database.
+    /// Validate that all configured tables exist in the database.
     ///
-    /// Runs `SELECT to_regclass($1)` for each table to verify its existence.
+    /// Reads tables from [`SourceConfig::tables`] and runs
+    /// `SELECT to_regclass($1)` for each to verify its existence.
     ///
     /// # Errors
-    //
+    ///
     /// Returns [`TapError::Config`] if any table does not exist.
-    pub async fn validate_tables(&self, tables: &[String]) -> Result<(), TapError> {
-        for table in tables {
+    pub async fn validate_tables(&self) -> Result<(), TapError> {
+        for table in &self.config.tables {
             let row = self
                 .client
                 .query_one("SELECT to_regclass($1)", &[table])
@@ -322,12 +385,8 @@ impl PgConnection {
         let _publication = publication.to_string();
         let _plugin = plugin.to_string();
 
-        // Validate slot name
-        if slot_name.is_empty() || !slot_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Err(TapError::Config(format!(
-                "invalid slot name '{slot_name}': only alphanumeric and underscore characters are allowed"
-            )));
-        }
+        // Validate slot name: alphanumeric + underscore only
+        crate::config::validate_identifier(slot_name, "slot_name")?;
 
         info!(
             "start_replication called (slot={slot_name}, publication={_publication}, \
@@ -343,12 +402,19 @@ impl PgConnection {
 
     /// Close the connection gracefully.
     ///
-    /// Drops the client, which will terminate the background connection
-    /// handler.
-    pub async fn close(self) -> Result<(), TapError> {
+    /// Drops the `Client`, waits for the background connection handler to
+    /// finish, and surfaces any panic that may have occurred in the handler
+    /// task.
+    pub async fn close(self) {
         info!("closing Postgres connection");
         drop(self.client);
-        Ok(())
+        if let Some(handle) = self.join_handle {
+            // Log if the background task panicked — the JoinHandle can't be
+            // cancelled at this point, we just surface the diagnostic.
+            if let Err(e) = handle.await {
+                tracing::error!("Postgres connection handler panicked: {e}");
+            }
+        }
     }
 
     /// Reference to the underlying config.
@@ -425,17 +491,17 @@ mod tests {
 
     #[test]
     fn test_lsn_zero_constant() {
-        assert_eq!(Lsn::ZERO, Lsn(0));
+        assert_eq!(Lsn::ZERO, Lsn::from_u64(0));
         assert_eq!(Lsn::ZERO.to_string(), "0/00000000");
     }
 
     #[test]
     fn test_lsn_ordering() {
-        assert!(Lsn(0) < Lsn(1));
-        assert!(Lsn(100) > Lsn(99));
-        assert!(Lsn(u64::MAX) > Lsn(0));
-        assert_eq!(Lsn(42), Lsn(42));
-        assert_ne!(Lsn(1), Lsn(2));
+        assert!(Lsn::from_u64(0) < Lsn::from_u64(1));
+        assert!(Lsn::from_u64(100) > Lsn::from_u64(99));
+        assert!(Lsn::from_u64(u64::MAX) > Lsn::from_u64(0));
+        assert_eq!(Lsn::from_u64(42), Lsn::from_u64(42));
+        assert_ne!(Lsn::from_u64(1), Lsn::from_u64(2));
     }
 
     #[test]
@@ -450,12 +516,18 @@ mod tests {
 
     #[test]
     fn test_lsn_specific_values() {
-        assert_eq!(Lsn::from_str("0/16B37428").unwrap(), Lsn(0x16B37428));
+        assert_eq!(
+            Lsn::from_str("0/16B37428").unwrap(),
+            Lsn::from_u64(0x16B37428)
+        );
         assert_eq!(
             Lsn::from_str("1/2A3B4C5D").unwrap(),
-            Lsn((1u64 << 32) | 0x2A3B4C5D)
+            Lsn::from_u64((1u64 << 32) | 0x2A3B4C5D)
         );
-        assert_eq!(Lsn::from_str("FFFFFFFF/FFFFFFFF").unwrap(), Lsn(u64::MAX));
+        assert_eq!(
+            Lsn::from_str("FFFFFFFF/FFFFFFFF").unwrap(),
+            Lsn::from_u64(u64::MAX)
+        );
     }
 
     #[test]
@@ -477,18 +549,18 @@ mod tests {
     fn test_lsn_hash() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(Lsn(1));
-        set.insert(Lsn(2));
-        set.insert(Lsn(1));
+        set.insert(Lsn::from_u64(1));
+        set.insert(Lsn::from_u64(2));
+        set.insert(Lsn::from_u64(1));
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn test_lsn_copy_trait() {
-        let a = Lsn(42);
+        let a = Lsn::from_u64(42);
         let _b = a; // move
         let _c = a; // still available — Copy
-        assert_eq!(a, Lsn(42));
+        assert_eq!(a, Lsn::from_u64(42));
     }
 
     // ── Connection string ────────────────────────────────────────────────
@@ -538,38 +610,47 @@ mod tests {
         assert!(debug_str.contains("<REDACTED>"));
     }
 
-    // ── Slot name validation ─────────────────────────────────────────────
+    // ── Identifier validation (via config::validate_identifier) ──────────
 
     #[test]
-    fn test_valid_slot_names() {
-        let valid_names = ["tap_slot", "slot123", "abc_def_123", "a", "Z"];
-        for name in &valid_names {
+    fn test_valid_identifiers() {
+        let valid = [
+            ("tap_slot", "slot_name"),
+            ("slot123", "slot_name"),
+            ("public.users", "table name"),
+            ("abc_def_123", "any"),
+            ("a", "any"),
+            ("Z", "any"),
+        ];
+        for (name, field) in &valid {
             assert!(
-                !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'),
+                crate::config::validate_identifier(name, field).is_ok(),
                 "'{name}' should be valid"
             );
         }
     }
 
     #[test]
-    fn test_invalid_slot_names() {
-        let invalid_names = ["tap-slot", "slot name", "slot.name", "", "slot$pecial"];
-        for name in &invalid_names {
+    fn test_invalid_identifiers() {
+        let invalid = [
+            "",
+            "tap-slot",
+            "slot name",
+            "slot$pecial",
+            "my_pub; DROP TABLE users;",
+        ];
+        for name in &invalid {
             assert!(
-                name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_'),
+                crate::config::validate_identifier(name, "test").is_err(),
                 "'{name}' should be invalid"
             );
         }
     }
 
-    // ── Publication name validation ──────────────────────────────────────
-
     #[test]
-    fn test_publication_name_sql_injection_prevention() {
-        // Publication names should be properly quoted in SQL statements
-        let pub_name = "my_pub; DROP TABLE users;";
-        let quoted = format!("\"{pub_name}\"");
-        assert_eq!(quoted, r#""my_pub; DROP TABLE users;""#);
+    fn test_empty_identifier_fails() {
+        let err = crate::config::validate_identifier("", "field").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
     }
 
     // ── ReplicationStream ────────────────────────────────────────────────
@@ -615,14 +696,14 @@ mod tests {
     #[test]
     fn test_lsn_high_bits_only() {
         let lsn = Lsn::from_str("1/0").unwrap();
-        assert_eq!(lsn, Lsn(1u64 << 32));
+        assert_eq!(lsn, Lsn::from_u64(1u64 << 32));
         assert_eq!(lsn.to_string(), "1/00000000");
     }
 
     #[test]
     fn test_lsn_low_bits_only() {
         let lsn = Lsn::from_str("0/FFFFFFFF").unwrap();
-        assert_eq!(lsn, Lsn(0xFFFF_FFFF));
+        assert_eq!(lsn, Lsn::from_u64(0xFFFF_FFFF));
         assert_eq!(lsn.to_string(), "0/FFFFFFFF");
     }
 
