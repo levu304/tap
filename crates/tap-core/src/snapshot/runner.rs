@@ -611,7 +611,7 @@ mod tests {
         let table = parse_qualified_name("public.users");
 
         // Single PK → `snap:public.users:id=42`
-        let pk_cols = vec!["id".to_string()];
+        let _pk_cols = vec!["id".to_string()];
         // The actual row rendering is tested via format
         let id_prefix = format!("snap:{}.{}:", table.schema, table.name);
         assert_eq!(id_prefix, "snap:public.users:");
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn test_build_snapshot_event_id_no_pk() {
         let table = parse_qualified_name("public.no_pk_table");
-        let pk_cols: Vec<String> = vec![];
+        let _pk_cols: Vec<String> = vec![];
 
         let prefix = format!("snap:{}.{}:", table.schema, table.name);
         // No PK → UUID suffix
@@ -727,7 +727,7 @@ mod tests {
     fn test_snapshot_event_id_roundtrip() {
         // Verify the expected format of snapshot event IDs
         let table = parse_qualified_name("public.users");
-        let expected_prefix = "snap:public.users:";
+        let _expected_prefix = "snap:public.users:";
         assert_eq!(
             format!("snap:{}:id=42", table.qualified),
             "snap:public.users:id=42"
