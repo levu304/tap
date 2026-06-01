@@ -64,4 +64,8 @@ pub enum TapError {
     /// Standard I/O error (file reads, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Error during snapshot operations.
+    #[error("Snapshot error: {0}")]
+    Snapshot(String),
 }

@@ -421,6 +421,14 @@ impl PgConnection {
     pub fn config(&self) -> &SourceConfig {
         &self.config
     }
+
+    /// Access the underlying tokio-postgres client for direct SQL queries.
+    ///
+    /// Used by the snapshot engine and other components that need to run
+    /// ad-hoc queries outside the replication protocol.
+    pub fn client(&self) -> &tokio_postgres::Client {
+        &self.client
+    }
 }
 
 // ---------------------------------------------------------------------------
