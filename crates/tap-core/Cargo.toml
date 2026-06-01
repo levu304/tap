@@ -22,3 +22,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 thiserror.workspace = true
+chrono = "0.4.44"

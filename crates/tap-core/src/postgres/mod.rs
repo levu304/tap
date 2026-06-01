@@ -11,5 +11,7 @@
 //!   payload bytes with XLogData message framing stripped.
 
 pub mod connection;
+pub mod decoder;
 
 pub use connection::{Lsn, PgConnection, ReplicationStream};
+pub use decoder::{create_decoder, ColumnInfo, PgoutputDecoder, RelationSchema, WalDecoder, Wal2JsonDecoder};
