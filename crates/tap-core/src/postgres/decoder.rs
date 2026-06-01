@@ -148,7 +148,6 @@ pub struct PgoutputDecoder {
     schema_cache: HashMap<u32, RelationSchema>,
 
     // ── Transaction state ────────────────────────────────────────────────
-
     /// LSN of the current transaction (from `Begin`).
     current_lsn: Option<PgLsn>,
     /// Transaction ID of the current transaction (from `Begin`).
@@ -186,7 +185,11 @@ impl PgoutputDecoder {
 
     /// Parse zero or more pgoutput messages from `buf` starting at `offset`.
     /// Returns accumulated events (only non-empty after a Commit).
-    fn decode_messages(&mut self, buf: &[u8], offset: &mut usize) -> Result<Vec<ChangeEvent>, TapError> {
+    fn decode_messages(
+        &mut self,
+        buf: &[u8],
+        offset: &mut usize,
+    ) -> Result<Vec<ChangeEvent>, TapError> {
         let mut events = Vec::new();
 
         while *offset < buf.len() {
@@ -209,7 +212,10 @@ impl PgoutputDecoder {
                 b'o' => self.skip_origin(buf, offset)?,
                 b't' => self.skip_truncate(buf, offset)?,
                 other => {
-                    debug!("skipping unknown pgoutput message type byte: 0x{:02x}", other);
+                    debug!(
+                        "skipping unknown pgoutput message type byte: 0x{:02x}",
+                        other
+                    );
                     // We cannot safely skip an unknown message structure,
                     // so return what we have rather than enter a spin loop.
                     break;
@@ -344,7 +350,11 @@ impl PgoutputDecoder {
     // ── Commit ('c') ────────────────────────────────────────────────
 
     /// Format: `'c' | Int64 flags | Int64 commit_lsn | Int64 end_lsn | Int64 ts_us`
-    fn decode_commit(&mut self, buf: &[u8], offset: &mut usize) -> Result<Vec<ChangeEvent>, TapError> {
+    fn decode_commit(
+        &mut self,
+        buf: &[u8],
+        offset: &mut usize,
+    ) -> Result<Vec<ChangeEvent>, TapError> {
         let _flags = read_i64(buf, offset)?;
         let commit_lsn = PgLsn::from_u64(read_i64(buf, offset)? as u64);
         let _end_lsn = read_i64(buf, offset)?;
@@ -410,7 +420,11 @@ impl PgoutputDecoder {
             let name = read_cstring(buf, offset)?;
             let typ = read_i32(buf, offset)? as u32;
             let modifier = read_i32(buf, offset)?;
-            columns.push(ColumnInfo { name, typ, modifier });
+            columns.push(ColumnInfo {
+                name,
+                typ,
+                modifier,
+            });
         }
 
         self.schema_cache.insert(
@@ -572,17 +586,15 @@ pub struct Wal2JsonDecoder;
 
 impl WalDecoder for Wal2JsonDecoder {
     fn decode(&mut self, message: &[u8]) -> Result<Vec<ChangeEvent>, TapError> {
-        let text = std::str::from_utf8(message).map_err(|e| {
-            TapError::Decode(format!("wal2json input is not valid UTF-8: {e}"))
-        })?;
+        let text = std::str::from_utf8(message)
+            .map_err(|e| TapError::Decode(format!("wal2json input is not valid UTF-8: {e}")))?;
 
-        let root: JsonValue = serde_json::from_str(text).map_err(|e| {
-            TapError::Decode(format!("wal2json parse error: {e}"))
-        })?;
+        let root: JsonValue = serde_json::from_str(text)
+            .map_err(|e| TapError::Decode(format!("wal2json parse error: {e}")))?;
 
-        let obj = root.as_object().ok_or_else(|| {
-            TapError::Decode("wal2json root is not a JSON object".into())
-        })?;
+        let obj = root
+            .as_object()
+            .ok_or_else(|| TapError::Decode("wal2json root is not a JSON object".into()))?;
 
         let xid = obj
             .get("xid")
@@ -592,16 +604,17 @@ impl WalDecoder for Wal2JsonDecoder {
 
         let ts_ms = parse_wal2json_timestamp(obj.get("timestamp"))?;
 
-        let changes = obj.get("change").and_then(|v| v.as_array()).ok_or_else(|| {
-            TapError::Decode("wal2json missing 'change' array".into())
-        })?;
+        let changes = obj
+            .get("change")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| TapError::Decode("wal2json missing 'change' array".into()))?;
 
         let mut events = Vec::with_capacity(changes.len());
 
         for change in changes {
-            let change_obj = change.as_object().ok_or_else(|| {
-                TapError::Decode("wal2json change entry is not an object".into())
-            })?;
+            let change_obj = change
+                .as_object()
+                .ok_or_else(|| TapError::Decode("wal2json change entry is not an object".into()))?;
 
             let kind = change_obj
                 .get("kind")
@@ -787,9 +800,8 @@ fn read_cstring(buf: &[u8], offset: &mut usize) -> Result<String, TapError> {
     // buf[*offset] is now NUL
     let slice = &buf[start..*offset];
     *offset += 1; // skip NUL
-    String::from_utf8(slice.to_vec()).map_err(|e| {
-        TapError::Decode(format!("invalid UTF-8 in C string: {e}"))
-    })
+    String::from_utf8(slice.to_vec())
+        .map_err(|e| TapError::Decode(format!("invalid UTF-8 in C string: {e}")))
 }
 
 /// Read exactly `len` bytes.
@@ -919,10 +931,7 @@ fn parse_wal2json_timestamp(ts: Option<&JsonValue>) -> Result<u64, TapError> {
 
     // No timezone — assume UTC.
     let cleaned = normalised.trim_end_matches('Z');
-    let naive_formats: &[&str] = &[
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-    ];
+    let naive_formats: &[&str] = &["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"];
     for fmt in naive_formats {
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(cleaned, fmt) {
             return Ok(dt.and_utc().timestamp_millis() as u64);
@@ -1183,13 +1192,7 @@ mod tests {
                 "users",
                 &[("id", 23, -1), ("name", 25, -1)],
             )),
-            vec![build_insert(
-                1,
-                &[
-                    (b"42", false),
-                    (b"Alice", false),
-                ],
-            )],
+            vec![build_insert(1, &[(b"42", false), (b"Alice", false)])],
             0x16B37429u64,
         );
 
@@ -1234,7 +1237,7 @@ mod tests {
             )),
             vec![build_update(
                 1,
-                Some(&[(b"1", false)]),  // old key
+                Some(&[(b"1", false)]), // old key
                 &[(b"1", false), (b"1999", false), (b"Widget", false)], // new tuple
             )],
             0x200,
@@ -1299,12 +1302,7 @@ mod tests {
             0x500,
             1001,
             3_000_000_000i64,
-            Some(build_relation(
-                1,
-                "public",
-                "t1",
-                &[("val", 25, -1)],
-            )),
+            Some(build_relation(1, "public", "t1", &[("val", 25, -1)])),
             vec![build_insert(1, &[(b"hello", false)])],
             0x600,
         );
@@ -1324,21 +1322,13 @@ mod tests {
         let mut decoder = PgoutputDecoder::new();
 
         // Send relation first, then a transaction
-        let rel = build_relation(
-            5,
-            "public",
-            "cache_test",
-            &[("col1", 23, -1)],
-        );
+        let rel = build_relation(5, "public", "cache_test", &[("col1", 23, -1)]);
 
         let mut msg = Vec::new();
         msg.extend_from_slice(&rel);
         // Begin + Insert + Commit referencing relation 5
         msg.extend_from_slice(&build_begin(0x10, 100_000i64, 1));
-        msg.extend_from_slice(&build_insert(
-            5,
-            &[(b"123", false)],
-        ));
+        msg.extend_from_slice(&build_insert(5, &[(b"123", false)]));
         msg.extend_from_slice(&build_commit(0, 0x20, 0x20, 100_000i64));
 
         let events = decoder.decode(&msg).unwrap();
@@ -1346,7 +1336,12 @@ mod tests {
         assert_eq!(events[0].source.table, "cache_test");
         assert_eq!(events[0].source.schema, "public");
         assert_eq!(
-            events[0].after.as_ref().unwrap().get("col1").and_then(|v| v.as_i64()),
+            events[0]
+                .after
+                .as_ref()
+                .unwrap()
+                .get("col1")
+                .and_then(|v| v.as_i64()),
             Some(123)
         );
     }
@@ -1429,20 +1424,35 @@ mod tests {
 
         assert_eq!(events[0].op, Operation::Create);
         assert_eq!(
-            events[0].after.as_ref().unwrap().get("id").and_then(|v| v.as_i64()),
+            events[0]
+                .after
+                .as_ref()
+                .unwrap()
+                .get("id")
+                .and_then(|v| v.as_i64()),
             Some(1)
         );
 
         assert_eq!(events[1].op, Operation::Create);
         assert_eq!(
-            events[1].after.as_ref().unwrap().get("val").and_then(|v| v.as_str()),
+            events[1]
+                .after
+                .as_ref()
+                .unwrap()
+                .get("val")
+                .and_then(|v| v.as_str()),
             Some("second")
         );
 
         assert_eq!(events[2].op, Operation::Update);
         assert!(events[2].before.is_some());
         assert_eq!(
-            events[2].after.as_ref().unwrap().get("val").and_then(|v| v.as_str()),
+            events[2]
+                .after
+                .as_ref()
+                .unwrap()
+                .get("val")
+                .and_then(|v| v.as_str()),
             Some("updated")
         );
 
@@ -1484,10 +1494,10 @@ mod tests {
         let insert = build_insert(
             1,
             &[
-                (b"Widget", false),    // name → string
-                (b"42", false),        // count → integer
-                (b"", true),           // nullable → null
-                (b"19.99", false),     // price → float
+                (b"Widget", false), // name → string
+                (b"42", false),     // count → integer
+                (b"", true),        // nullable → null
+                (b"19.99", false),  // price → float
             ],
         );
         let commit = build_commit(0, 0x20, 0x20, 1_000_000i64);
@@ -1572,11 +1582,17 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.op, Operation::Update);
 
-        let before = ev.before.as_ref().expect("update should have before (oldkeys)");
+        let before = ev
+            .before
+            .as_ref()
+            .expect("update should have before (oldkeys)");
         assert_eq!(before.get("id").and_then(|v| v.as_i64()), Some(1));
 
         let after = ev.after.as_ref().expect("update should have after");
-        assert_eq!(after.get("name").and_then(|v| v.as_str()), Some("Super Widget"));
+        assert_eq!(
+            after.get("name").and_then(|v| v.as_str()),
+            Some("Super Widget")
+        );
         assert_eq!(after.get("price").and_then(|v| v.as_f64()), Some(29.99));
     }
 
@@ -1608,7 +1624,10 @@ mod tests {
         assert_eq!(ev.op, Operation::Delete);
         assert!(ev.after.is_none(), "delete has no after");
 
-        let before = ev.before.as_ref().expect("delete should have before (oldkeys)");
+        let before = ev
+            .before
+            .as_ref()
+            .expect("delete should have before (oldkeys)");
         assert_eq!(before.get("id").and_then(|v| v.as_i64()), Some(99));
     }
 
@@ -1644,12 +1663,7 @@ mod tests {
         let mut decoder = PgoutputDecoder::new();
 
         // Send relation in first call
-        let rel = build_relation(
-            99,
-            "public",
-            "persist_test",
-            &[("x", 23, -1)],
-        );
+        let rel = build_relation(99, "public", "persist_test", &[("x", 23, -1)]);
         let result = decoder.decode(&rel).unwrap();
         assert!(result.is_empty(), "relation produces no events");
 
@@ -1673,12 +1687,7 @@ mod tests {
     fn test_relation_only_message() {
         let mut decoder = PgoutputDecoder::new();
 
-        let rel = build_relation(
-            42,
-            "public",
-            "just_schema",
-            &[("a", 25, -1)],
-        );
+        let rel = build_relation(42, "public", "just_schema", &[("a", 25, -1)]);
         let events = decoder.decode(&rel).unwrap();
         assert!(events.is_empty());
     }
@@ -1700,7 +1709,12 @@ mod tests {
 
         let result = decoder.decode(&msg);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no schema cache entry"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no schema cache entry")
+        );
     }
 
     // ── Test: wal2json with unknown kind is skipped ──────────────────
