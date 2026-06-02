@@ -513,9 +513,7 @@ impl SseServer {
         {
             let handle = self.server_handle.lock().await;
             if handle.is_some() {
-                return Err(TapError::Config(
-                    "SSE server is already running".into(),
-                ));
+                return Err(TapError::Config("SSE server is already running".into()));
             }
         }
 
@@ -547,8 +545,7 @@ impl SseServer {
         let hb_tx = self.event_broadcast.clone();
         let hb_interval = Duration::from_millis(self.config.heartbeat_interval_ms);
         let hb_shutdown = self.shutdown_tx.subscribe();
-        let hb_handle =
-            tokio::spawn(heartbeat_task(hb_tx, hb_interval, hb_shutdown));
+        let hb_handle = tokio::spawn(heartbeat_task(hb_tx, hb_interval, hb_shutdown));
         self.heartbeat_handle.lock().await.replace(hb_handle);
 
         // Spawn server with graceful shutdown
