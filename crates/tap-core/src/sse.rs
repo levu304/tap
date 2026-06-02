@@ -371,11 +371,11 @@ async fn auth_middleware(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map_or(false, |k| k == api_key);
+        .is_some_and(|k| k == api_key);
     let key_match = headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map_or(false, |k| k == api_key);
+        .is_some_and(|k| k == api_key);
 
     if auth_match || key_match {
         next.run(req).await
