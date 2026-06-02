@@ -11,11 +11,7 @@ use tracing::info;
 #[derive(Args, Debug, Clone)]
 pub struct DevArgs {
     /// Path to the TOML configuration file.
-    #[arg(
-        short = 'c',
-        long = "config",
-        default_value = ".tap/config.toml"
-    )]
+    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
     pub config: String,
 
     /// Start replication from a specific LSN (overrides saved checkpoint).
@@ -46,7 +42,10 @@ pub async fn run(args: DevArgs) -> Result<(), TapError> {
     // Future enhancement: add a separate HTML status page route
     // to the SSE server for `tap dev`.
     println!("╔══════════════════════════════════════════════╗");
-    println!("║     Tap Dev Mode — v{}              ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "║     Tap Dev Mode — v{}              ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("╚══════════════════════════════════════════════╝");
     println!();
 

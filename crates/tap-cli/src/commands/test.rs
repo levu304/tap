@@ -14,11 +14,7 @@ use tap_core::event::ChangeEvent;
 #[derive(Args, Debug, Clone)]
 pub struct TestArgs {
     /// Path to the TOML configuration file.
-    #[arg(
-        short = 'c',
-        long = "config",
-        default_value = ".tap/config.toml"
-    )]
+    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
     pub config: String,
 
     /// List available fixture files from `.tap/fixtures/`.
@@ -83,9 +79,7 @@ fn list_fixtures() -> Result<(), TapError> {
     println!("Fixture files in {FIXTURE_DIR}/:");
     for entry in &entries {
         let meta = entry.metadata().ok();
-        let size = meta
-            .as_ref()
-            .map_or(0, std::fs::Metadata::len);
+        let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
         println!("  {} ({} bytes)", entry.file_name().to_string_lossy(), size);
     }
 
@@ -98,9 +92,8 @@ fn validate_fixture(path: &str) -> Result<(), TapError> {
         .map_err(|e| TapError::Io(std::io::Error::new(e.kind(), format!("{path}: {e}"))))?;
 
     // Try to parse as a ChangeEvent
-    let event: ChangeEvent = serde_json::from_str(&content).map_err(|e| {
-        TapError::Decode(format!("{path}: invalid ChangeEvent JSON: {e}"))
-    })?;
+    let event: ChangeEvent = serde_json::from_str(&content)
+        .map_err(|e| TapError::Decode(format!("{path}: invalid ChangeEvent JSON: {e}")))?;
 
     println!("✓ {path} — valid ChangeEvent");
     println!(

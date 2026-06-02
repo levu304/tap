@@ -23,11 +23,7 @@ use tracing::{info, warn};
 #[derive(Args, Debug, Clone)]
 pub struct CaptureArgs {
     /// Path to the TOML configuration file.
-    #[arg(
-        short = 'c',
-        long = "config",
-        default_value = ".tap/config.toml"
-    )]
+    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
     pub config: String,
 
     /// Start replication from a specific LSN (overrides saved checkpoint).
@@ -89,7 +85,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
             store.read_last_offset()?
         };
         if let Some(offset) = saved {
-            info!("Resuming from saved checkpoint LSN: {}", offset.committed_lsn);
+            info!(
+                "Resuming from saved checkpoint LSN: {}",
+                offset.committed_lsn
+            );
             Some(offset.committed_lsn.parse::<Lsn>()?)
         } else {
             info!("No saved checkpoint found — will start from current position");
@@ -218,7 +217,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         )
         .await?;
 
-    info!("Replication stream active (slot={})", config.source.slot_name);
+    info!(
+        "Replication stream active (slot={})",
+        config.source.slot_name
+    );
 
     // ── 10. Main event loop ──────────────────────────────────────────
     info!("Capture running — waiting for events (SSE on port {port})");

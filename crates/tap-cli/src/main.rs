@@ -17,7 +17,7 @@
     clippy::doc_markdown,
     clippy::default_trait_access,
     clippy::too_many_lines,
-    clippy::similar_names,
+    clippy::similar_names
 )]
 
 use std::process::ExitCode;
@@ -62,7 +62,7 @@ struct Cli {
         long = "config",
         default_value = ".tap/config.toml",
         global = true,
-        help = "Path to TOML configuration file",
+        help = "Path to TOML configuration file"
     )]
     config: String,
 
@@ -71,7 +71,7 @@ struct Cli {
         long = "log-level",
         default_value = "info",
         global = true,
-        help = "Log level filter",
+        help = "Log level filter"
     )]
     log_level: String,
 
@@ -80,7 +80,7 @@ struct Cli {
         long = "log-format",
         default_value = "text",
         global = true,
-        help = "Log format (text or json)",
+        help = "Log format (text or json)"
     )]
     log_format: String,
 
@@ -214,29 +214,25 @@ mod tests {
 
     #[test]
     fn test_cli_capture_subcommand() {
-        let cli = Cli::try_parse_from(["tap", "capture"])
-            .expect("should parse capture command");
+        let cli = Cli::try_parse_from(["tap", "capture"]).expect("should parse capture command");
         assert!(matches!(cli.command, Command::Capture(_)));
     }
 
     #[test]
     fn test_cli_inspect_subcommand() {
-        let cli = Cli::try_parse_from(["tap", "inspect"])
-            .expect("should parse inspect command");
+        let cli = Cli::try_parse_from(["tap", "inspect"]).expect("should parse inspect command");
         assert!(matches!(cli.command, Command::Inspect(_)));
     }
 
     #[test]
     fn test_cli_dev_subcommand() {
-        let cli = Cli::try_parse_from(["tap", "dev"])
-            .expect("should parse dev command");
+        let cli = Cli::try_parse_from(["tap", "dev"]).expect("should parse dev command");
         assert!(matches!(cli.command, Command::Dev(_)));
     }
 
     #[test]
     fn test_cli_test_subcommand() {
-        let cli = Cli::try_parse_from(["tap", "test"])
-            .expect("should parse test command");
+        let cli = Cli::try_parse_from(["tap", "test"]).expect("should parse test command");
         assert!(matches!(cli.command, Command::Test(_)));
     }
 
@@ -263,10 +259,7 @@ mod tests {
 
     #[test]
     fn test_exit_codes() {
-        assert_eq!(
-            exit_code_for_error(&TapError::Config("bad".into())),
-            1
-        );
+        assert_eq!(exit_code_for_error(&TapError::Config("bad".into())), 1);
         assert_eq!(
             exit_code_for_error(&TapError::PostgresConnectionRedacted("fail".into())),
             2
@@ -282,10 +275,7 @@ mod tests {
             ))),
             4
         );
-        assert_eq!(
-            exit_code_for_error(&TapError::Decode("bad data".into())),
-            5
-        );
+        assert_eq!(exit_code_for_error(&TapError::Decode("bad data".into())), 5);
         assert_eq!(
             exit_code_for_error(&TapError::StateCorruption("corrupt".into())),
             7
@@ -329,17 +319,19 @@ mod tests {
 
     #[test]
     fn test_init_args_defaults() {
-        let args = extract_init(Cli::try_parse_from([
-            "tap",
-            "init",
-            "--db",
-            "mydb",
-            "--user",
-            "u",
-            "--password",
-            "p",
-        ])
-        .expect("should parse"));
+        let args = extract_init(
+            Cli::try_parse_from([
+                "tap",
+                "init",
+                "--db",
+                "mydb",
+                "--user",
+                "u",
+                "--password",
+                "p",
+            ])
+            .expect("should parse"),
+        );
 
         assert_eq!(args.db, "mydb");
         assert_eq!(args.slot, "tap_slot");
@@ -351,9 +343,7 @@ mod tests {
 
     #[test]
     fn test_capture_args_defaults() {
-        let args = extract_capture(
-            Cli::try_parse_from(["tap", "capture"]).expect("should parse"),
-        );
+        let args = extract_capture(Cli::try_parse_from(["tap", "capture"]).expect("should parse"));
 
         assert_eq!(args.config, ".tap/config.toml");
         assert!(args.from_lsn.is_none());
@@ -363,9 +353,7 @@ mod tests {
 
     #[test]
     fn test_inspect_args_defaults() {
-        let args = extract_inspect(
-            Cli::try_parse_from(["tap", "inspect"]).expect("should parse"),
-        );
+        let args = extract_inspect(Cli::try_parse_from(["tap", "inspect"]).expect("should parse"));
 
         assert_eq!(args.config, ".tap/config.toml");
         assert!(!args.json);
@@ -374,9 +362,7 @@ mod tests {
 
     #[test]
     fn test_dev_args_defaults() {
-        let args = extract_dev(
-            Cli::try_parse_from(["tap", "dev"]).expect("should parse"),
-        );
+        let args = extract_dev(Cli::try_parse_from(["tap", "dev"]).expect("should parse"));
 
         assert_eq!(args.config, ".tap/config.toml");
         assert!(args.from_lsn.is_none());
@@ -385,9 +371,7 @@ mod tests {
 
     #[test]
     fn test_test_args_defaults() {
-        let args = extract_test(
-            Cli::try_parse_from(["tap", "test"]).expect("should parse"),
-        );
+        let args = extract_test(Cli::try_parse_from(["tap", "test"]).expect("should parse"));
 
         assert_eq!(args.config, ".tap/config.toml");
         assert!(!args.list);

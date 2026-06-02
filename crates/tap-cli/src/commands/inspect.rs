@@ -13,11 +13,7 @@ use tap_core::error::TapError;
 #[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
     /// Path to the TOML configuration file.
-    #[arg(
-        short = 'c',
-        long = "config",
-        default_value = ".tap/config.toml"
-    )]
+    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
     pub config: String,
 
     /// Output as JSON schema instead of TypeScript type definitions.
@@ -43,22 +39,46 @@ pub(crate) struct ColumnInfo {
 /// Map a Postgres data type name to a TypeScript type string.
 fn pg_type_to_ts(pg_type: &str) -> &'static str {
     match pg_type {
-        "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8"
-        | "smallserial" | "serial" | "bigserial" | "serial8"
-        | "real" | "float4" | "double precision" | "float8"
-        | "numeric" | "decimal" | "money" | "oid" => "number",
+        "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" | "smallserial"
+        | "serial" | "bigserial" | "serial8" | "real" | "float4" | "double precision"
+        | "float8" | "numeric" | "decimal" | "money" | "oid" => "number",
 
         "boolean" | "bool" => "boolean",
 
-        "character varying" | "varchar" | "character" | "char"
-        | "text" | "citext" | "name" | "bpchar"
-        | "timestamp" | "timestamptz" | "timestamp with time zone"
-        | "timestamp without time zone" | "date" | "time" | "timetz"
-        | "time with time zone" | "time without time zone" | "interval"
-        | "uuid" | "bytea"
-        | "inet" | "cidr" | "macaddr" | "macaddr8"
-        | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle"
-        | "xml" | "tsvector" | "tsquery" => "string",
+        "character varying"
+        | "varchar"
+        | "character"
+        | "char"
+        | "text"
+        | "citext"
+        | "name"
+        | "bpchar"
+        | "timestamp"
+        | "timestamptz"
+        | "timestamp with time zone"
+        | "timestamp without time zone"
+        | "date"
+        | "time"
+        | "timetz"
+        | "time with time zone"
+        | "time without time zone"
+        | "interval"
+        | "uuid"
+        | "bytea"
+        | "inet"
+        | "cidr"
+        | "macaddr"
+        | "macaddr8"
+        | "point"
+        | "line"
+        | "lseg"
+        | "box"
+        | "path"
+        | "polygon"
+        | "circle"
+        | "xml"
+        | "tsvector"
+        | "tsquery" => "string",
 
         "json" | "jsonb" => "any",
         "array" => "unknown[]",
@@ -137,7 +157,11 @@ pub(crate) async fn generate_typescript_types(
         for col in columns {
             let ts_type = pg_type_to_ts(&col.data_type);
             let optional = if col.is_nullable { "?" } else { "" };
-            let _ = writeln!(output, "  {col_name}{optional}: {ts_type};", col_name = col.column_name);
+            let _ = writeln!(
+                output,
+                "  {col_name}{optional}: {ts_type};",
+                col_name = col.column_name
+            );
         }
 
         output.push_str("}\n\n");
@@ -202,19 +226,16 @@ pub(crate) async fn generate_json_schema(
         }
 
         let mut schema = serde_json::Map::new();
-        schema.insert(
-            "type".into(),
-            serde_json::Value::String("object".into()),
-        );
-        schema.insert(
-            "title".into(),
-            serde_json::Value::String(table.clone()),
-        );
+        schema.insert("type".into(), serde_json::Value::String("object".into()));
+        schema.insert("title".into(), serde_json::Value::String(table.clone()));
         schema.insert("properties".into(), serde_json::Value::Object(properties));
         schema.insert(
             "required".into(),
             serde_json::Value::Array(
-                required.into_iter().map(serde_json::Value::String).collect(),
+                required
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
             ),
         );
 
