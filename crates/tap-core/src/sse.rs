@@ -29,17 +29,17 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
-use axum::Router;
 use futures::stream::Stream;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::config::SinkConfig;
@@ -317,10 +317,7 @@ async fn heartbeat_task(
 // ---------------------------------------------------------------------------
 
 /// `GET /events` — SSE event stream.
-async fn handle_events(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn handle_events(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     // Extract Last-Event-ID for resume (best-effort).
     let _last_event_id = headers
         .get("last-event-id")
@@ -544,11 +541,11 @@ mod tests {
 
         let output = format_sse_event(&event);
 
-        assert!(output.starts_with("event: change\n"), "wrong event type line");
         assert!(
-            output.contains("id: 0/16B37428:12345\n"),
-            "missing id line"
+            output.starts_with("event: change\n"),
+            "wrong event type line"
         );
+        assert!(output.contains("id: 0/16B37428:12345\n"), "missing id line");
         assert!(
             output.contains(r#""op":"c""#) && output.contains(r#""after":{"id":1}"#),
             "missing or wrong data line: {output:?}"
@@ -558,8 +555,7 @@ mod tests {
 
     #[test]
     fn test_sse_event_id_included() {
-        let with_id = SseEvent::new(SseEventType::Change, json!({"k": "v"}))
-            .with_id("0/1:42");
+        let with_id = SseEvent::new(SseEventType::Change, json!({"k": "v"})).with_id("0/1:42");
         let without_id = SseEvent::new(SseEventType::Heartbeat, json!({"ts_ms": 0}));
 
         assert!(format_sse_event(&with_id).contains("id: "));
@@ -621,9 +617,8 @@ mod tests {
             .await
             .expect("TCP connect to SSE server");
 
-        let request = format!(
-            "GET /events HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n\r\n"
-        );
+        let request =
+            format!("GET /events HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -656,10 +651,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let mut n = 0;
         while n < buf.len() {
-            let bytes = stream
-                .read(&mut buf[n..])
-                .await
-                .expect("read HTTP headers");
+            let bytes = stream.read(&mut buf[n..]).await.expect("read HTTP headers");
             if bytes == 0 {
                 break;
             }
@@ -679,19 +671,13 @@ mod tests {
     /// Helper: send a raw HTTP GET and return (header_lines, body_bytes).
     /// Works for bounded responses (health, status).  For SSE use
     /// [`read_http_headers`] instead.
-    async fn http_get_bounded(
-        host: &str,
-        port: u16,
-        path: &str,
-    ) -> (Vec<String>, Vec<u8>) {
+    async fn http_get_bounded(host: &str, port: u16, path: &str) -> (Vec<String>, Vec<u8>) {
         let addr = format!("{host}:{port}");
         let mut stream = TcpStream::connect(&addr)
             .await
             .expect("TCP connect for HTTP GET");
 
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-        );
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -701,10 +687,7 @@ mod tests {
         let mut resp = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
-            let n = stream
-                .read(&mut buf)
-                .await
-                .expect("read HTTP response");
+            let n = stream.read(&mut buf).await.expect("read HTTP response");
             if n == 0 {
                 break;
             }
@@ -716,8 +699,7 @@ mod tests {
         if let Some(idx) = text.find("\r\n\r\n") {
             let header_text = &text[..idx];
             let body = resp[idx + 4..].to_vec();
-            let header_lines: Vec<String> =
-                header_text.lines().map(|l| l.to_string()).collect();
+            let header_lines: Vec<String> = header_text.lines().map(|l| l.to_string()).collect();
             (header_lines, body)
         } else {
             (vec![], resp)
@@ -762,9 +744,7 @@ mod tests {
         let (server, port) = test_server().await;
 
         let addr = format!("127.0.0.1:{port}");
-        let mut stream = TcpStream::connect(&addr)
-            .await
-            .expect("TCP connect");
+        let mut stream = TcpStream::connect(&addr).await.expect("TCP connect");
 
         let request = format!(
             "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
@@ -960,10 +940,7 @@ mod tests {
 
         server
             .broadcast()
-            .send(
-                SseEvent::new(SseEventType::Change, json!({"x": 1}))
-                    .with_id("0/ABCDEF:99"),
-            )
+            .send(SseEvent::new(SseEventType::Change, json!({"x": 1})).with_id("0/ABCDEF:99"))
             .ok();
 
         let mut found_id = false;
