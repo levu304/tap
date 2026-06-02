@@ -16,4 +16,5 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio-postgres.workspace = true
