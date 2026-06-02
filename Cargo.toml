@@ -39,6 +39,10 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# HTTP / SSE server
+axum = "0.8"
+http = "1"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

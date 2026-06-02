@@ -297,6 +297,11 @@ pub struct SinkConfig {
     pub max_buffer_size: usize,
     /// SSE heartbeat interval in milliseconds.
     pub heartbeat_interval_ms: u64,
+    /// Optional API key for authenticating SSE client connections.
+    /// Clients provide it via `Authorization: Bearer <key>` or
+    /// `X-Api-Key: <key>`.  When `None`, auth is disabled.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for SinkConfig {
@@ -306,6 +311,7 @@ impl Default for SinkConfig {
             port: 8080,
             max_buffer_size: 1000,
             heartbeat_interval_ms: 30_000,
+            api_key: None,
         }
     }
 }

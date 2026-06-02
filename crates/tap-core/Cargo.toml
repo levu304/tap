@@ -22,4 +22,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 thiserror.workspace = true
+axum.workspace = true
+http.workspace = true
+tokio-stream = "0.1"
 chrono = "0.4.44"
+
+
