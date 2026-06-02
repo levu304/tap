@@ -52,7 +52,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         config.capture.snapshot = true;
     }
     if !args.tables.is_empty() {
-        config.source.tables = args.tables.clone();
+        config.source.tables.clone_from(&args.tables);
     }
     if let Some(ref lsn) = args.from_lsn {
         config.capture.from_lsn = Some(lsn.clone());
