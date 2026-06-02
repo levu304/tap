@@ -1,7 +1,15 @@
 //! SSE (Server-Sent Events) server for streaming change events.
 //!
-//! axum-based HTTP/2 server with 8 event types, health/status endpoints,
-//! broadcast fan-out, heartbeat timer, and Last-Event-ID resume.
+//! axum-based HTTP/1.1 server with 8 event types, health/status endpoints,
+//! broadcast fan-out, and heartbeat timer.
+//!
+//! # TODO
+//!
+//! * **Last-Event-ID resume**: not yet implemented. Reconnecting clients
+//!   send a `Last-Event-ID` header expecting replay from that position;
+//!   currently the server silently ignores it and starts from the current
+//!   broadcast stream.  A WAL-backed state store is needed for correct
+//!   replay.
 //!
 //! # Architecture
 //!
@@ -30,8 +38,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
@@ -40,7 +50,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::sync::{Mutex, RwLock, broadcast};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::SinkConfig;
 use crate::error::TapError;
@@ -197,6 +207,8 @@ struct AppState {
     health_state: Arc<RwLock<HealthState>>,
     shutdown_rx: watch::Receiver<bool>,
     start_time: Instant,
+    api_key: Option<String>,
+    buffer_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,11 +248,16 @@ pub fn format_sse_event(event: &SseEvent) -> String {
 
 /// Creates a `Stream` that bridges the broadcast channel to SSE-formatted
 /// strings, terminating when a shutdown signal is received.
+///
+/// The bridge uses a bounded mpsc channel to prevent slow consumers from
+/// exhausting memory.  If the channel is full (consumer too slow), the
+/// bridge loop breaks and the client is disconnected.
 fn sse_event_stream(
     rx: broadcast::Receiver<SseEvent>,
     shutdown_rx: watch::Receiver<bool>,
+    buffer_size: usize,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
-    let (tx, recv) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, recv) = tokio::sync::mpsc::channel(buffer_size);
 
     tokio::spawn(async move {
         let mut rx = rx;
@@ -248,6 +265,7 @@ fn sse_event_stream(
 
         loop {
             tokio::select! {
+                biased;
                 result = rx.recv() => {
                     match result {
                         Ok(sse_event) => {
@@ -257,13 +275,23 @@ fn sse_event_stream(
                             if let Some(id) = &sse_event.id {
                                 event = event.id(id);
                             }
-                            if tx.send(Ok(event)).is_err() {
+                            if tx.send(Ok(event)).await.is_err() {
                                 // Receiver dropped (client disconnected)
                                 break;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // Consumer too slow — skip & continue
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // Notify client of the gap instead of silently dropping
+                            let err_event = Event::default()
+                                .event(SseEventType::Error.as_str())
+                                .data(serde_json::to_string(&serde_json::json!({
+                                    "code": "lagged",
+                                    "skipped": n,
+                                })).unwrap_or_default());
+                            // If the mpsc send fails the client is gone — break out
+                            if tx.send(Ok(err_event)).await.is_err() {
+                                break;
+                            }
                             continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -277,7 +305,7 @@ fn sse_event_stream(
         }
     });
 
-    UnboundedReceiverStream::new(recv)
+    ReceiverStream::new(recv)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,21 +341,73 @@ async fn heartbeat_task(
 }
 
 // ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
+
+/// Middleware that requires a valid API key for all routes except `/health`.
+///
+/// Clients authenticate via the `Authorization: Bearer <key>` header or the
+/// `X-Api-Key: <key>` header.  When no API key is configured (`api_key` is
+/// `None`), all requests pass through unauthenticated.
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    // If no api_key configured, auth is disabled — allow all
+    let api_key = match &state.api_key {
+        Some(k) => k.clone(),
+        None => return next.run(req).await,
+    };
+
+    // /health is public
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+
+    // Check Authorization: Bearer <key> or X-Api-Key: <key>
+    let headers = req.headers();
+    let auth_match = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map_or(false, |k| k == api_key);
+    let key_match = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |k| k == api_key);
+
+    if auth_match || key_match {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "unauthorized",
+                "message": "Provide a valid API key via Authorization: Bearer <key> or X-Api-Key: <key>"
+            })),
+        )
+            .into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
 
 /// `GET /events` — SSE event stream.
-async fn handle_events(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    // Extract Last-Event-ID for resume (best-effort).
-    let _last_event_id = headers
-        .get("last-event-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
+///
+/// # Last-Event-ID resume
+///
+/// Not yet implemented.  Reconnecting clients send a `Last-Event-ID`
+/// header expecting replay from that position; currently the server
+/// starts from the current broadcast stream position.  A WAL-backed
+/// state store is required for correct replay (see module-level TODO).
+async fn handle_events(State(state): State<Arc<AppState>>, _headers: HeaderMap) -> Response {
     let rx = state.event_broadcast.subscribe();
     let shutdown_rx = state.shutdown_rx.clone();
 
-    let stream = sse_event_stream(rx, shutdown_rx);
+    let stream = sse_event_stream(rx, shutdown_rx, state.buffer_size);
 
     Sse::new(stream).into_response()
 }
@@ -355,16 +435,24 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// `GET /status` — Capture status (more detailed than health).
-async fn handle_status(State(state): State<Arc<AppState>>) -> Json<HealthState> {
+async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let health = state.health_state.read().await;
-    Json(health.clone())
+    let uptime_ms = state.start_time.elapsed().as_millis() as u64;
+    Json(serde_json::json!({
+        "status": health.status,
+        "uptime_ms": uptime_ms,
+        "events_captured": health.events_captured,
+        "current_lsn": health.current_lsn,
+        "lag_ms": health.lag_ms,
+        "state": health.state,
+    }))
 }
 
 // ---------------------------------------------------------------------------
 // SseServer
 // ---------------------------------------------------------------------------
 
-/// HTTP/2 SSE server that streams change events to connected clients.
+/// HTTP/1.1 SSE server that streams change events to connected clients.
 ///
 /// # Example (conceptual)
 ///
@@ -388,6 +476,7 @@ pub struct SseServer {
     health_state: Arc<RwLock<HealthState>>,
     shutdown_tx: watch::Sender<bool>,
     server_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    heartbeat_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SseServer {
@@ -404,6 +493,7 @@ impl SseServer {
             health_state: Arc::new(RwLock::new(HealthState::default())),
             shutdown_tx,
             server_handle: Arc::new(Mutex::new(None)),
+            heartbeat_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -419,6 +509,16 @@ impl SseServer {
     ///
     /// Returns [`TapError::Io`] if the TCP listener cannot bind.
     pub async fn start(&self) -> Result<u16, TapError> {
+        // Guard: prevent double-start (heartbeat + server tasks would leak)
+        {
+            let handle = self.server_handle.lock().await;
+            if handle.is_some() {
+                return Err(TapError::Config(
+                    "SSE server is already running".into(),
+                ));
+            }
+        }
+
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr).await.map_err(TapError::Io)?;
         let port = listener.local_addr().map_err(TapError::Io)?.port();
@@ -428,24 +528,30 @@ impl SseServer {
             health_state: self.health_state.clone(),
             shutdown_rx: self.shutdown_tx.subscribe(),
             start_time: Instant::now(),
+            api_key: self.config.api_key.clone(),
+            buffer_size: self.config.max_buffer_size,
         });
 
-        // Build router
+        // Build router with auth middleware
         let app = Router::new()
             .route("/events", get(handle_events))
             .route("/health", get(handle_health))
             .route("/status", get(handle_status))
+            .route_layer(middleware::from_fn_with_state(
+                app_state.clone(),
+                auth_middleware,
+            ))
             .with_state(app_state);
 
         // Spawn heartbeat task
         let hb_tx = self.event_broadcast.clone();
         let hb_interval = Duration::from_millis(self.config.heartbeat_interval_ms);
         let hb_shutdown = self.shutdown_tx.subscribe();
-        tokio::spawn(heartbeat_task(hb_tx, hb_interval, hb_shutdown));
+        let hb_handle =
+            tokio::spawn(heartbeat_task(hb_tx, hb_interval, hb_shutdown));
+        self.heartbeat_handle.lock().await.replace(hb_handle);
 
         // Spawn server with graceful shutdown
-        // axum::serve returns a Serve future that never completes on its own;
-        // with_graceful_shutdown allows us to stop it via a signal.
         let graceful_shutdown_signal = {
             let mut rx = self.shutdown_tx.subscribe();
             async move {
@@ -474,6 +580,11 @@ impl SseServer {
     /// shutdown signal (which terminates the heartbeat task and all SSE
     /// streams), then waits for the server task to complete.
     pub async fn shutdown(&self) {
+        // Abort heartbeat task
+        if let Some(handle) = self.heartbeat_handle.lock().await.take() {
+            handle.abort();
+        }
+
         // Send shutdown event to clients
         let events_captured = {
             let health = self.health_state.read().await;
@@ -603,6 +714,7 @@ mod tests {
             port: 0,
             max_buffer_size: 100,
             heartbeat_interval_ms: 100,
+            api_key: None,
         };
         let server = SseServer::new(config);
         let port = server.start().await.expect("server should start");
@@ -801,6 +913,11 @@ mod tests {
             serde_json::from_slice(&body).expect("status body should be JSON");
         assert_eq!(parsed["state"], "idle");
         assert_eq!(parsed["status"], "ok");
+        // uptime_ms is computed from start_time (always present as a number)
+        assert!(
+            parsed["uptime_ms"].is_number(),
+            "uptime_ms should be a number"
+        );
 
         server.shutdown().await;
     }
@@ -966,6 +1083,70 @@ mod tests {
         }
 
         assert!(found_id, "SSE event should contain the id: field");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_sse_auth_blocks_unauthenticated() {
+        let config = SinkConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            max_buffer_size: 100,
+            heartbeat_interval_ms: 100,
+            api_key: Some("secret".into()),
+        };
+        let server = SseServer::new(config);
+        let port = server.start().await.expect("server should start");
+
+        // Request without auth should get 401
+        let (headers, _) = http_get_bounded("127.0.0.1", port, "/events").await;
+        assert_eq!(
+            parse_status_line(&headers),
+            401,
+            "expected 401 without auth"
+        );
+
+        // Request with valid Bearer token should get 200
+        let addr = format!("127.0.0.1:{port}");
+        let mut stream = TcpStream::connect(&addr).await.expect("TCP connect");
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer secret\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        stream.flush().await.expect("flush");
+        let headers = read_http_headers(&mut stream).await;
+        assert_eq!(
+            parse_status_line(&headers),
+            200,
+            "expected 200 with Bearer auth"
+        );
+        drop(stream);
+
+        // Request with valid X-Api-Key should also get 200
+        let mut stream = TcpStream::connect(&addr).await.expect("TCP connect");
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Api-Key: secret\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        stream.flush().await.expect("flush");
+        let headers = read_http_headers(&mut stream).await;
+        assert_eq!(
+            parse_status_line(&headers),
+            200,
+            "expected 200 with X-Api-Key auth"
+        );
+        drop(stream);
+
+        // /health should still be accessible without auth
+        let (headers, _) = http_get_bounded("127.0.0.1", port, "/health").await;
+        assert_eq!(parse_status_line(&headers), 200, "expected 200 for /health");
+
         server.shutdown().await;
     }
 }
