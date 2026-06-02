@@ -16,7 +16,7 @@ use tap_core::postgres::{Lsn, PgConnection, connect_plain};
 use tap_core::snapshot::SnapshotRunner;
 use tap_core::sse::{SseEvent, SseEventType, SseServer};
 use tap_core::state::StateStore;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
