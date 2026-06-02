@@ -14,7 +14,11 @@ use tap_core::event::ChangeEvent;
 #[derive(Args, Debug, Clone)]
 pub struct TestArgs {
     /// Path to the TOML configuration file.
-    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value_t = String::from(crate::config::DEFAULT_CONFIG_PATH)
+    )]
     pub config: String,
 
     /// List available fixture files from `.tap/fixtures/`.

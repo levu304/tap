@@ -11,7 +11,11 @@ use tracing::info;
 #[derive(Args, Debug, Clone)]
 pub struct DevArgs {
     /// Path to the TOML configuration file.
-    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value_t = String::from(crate::config::DEFAULT_CONFIG_PATH)
+    )]
     pub config: String,
 
     /// Start replication from a specific LSN (overrides saved checkpoint).

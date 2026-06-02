@@ -16,6 +16,7 @@ use tap_core::postgres::{Lsn, PgConnection, connect_plain};
 use tap_core::snapshot::SnapshotRunner;
 use tap_core::sse::{SseEvent, SseEventType, SseServer};
 use tap_core::state::StateStore;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -23,11 +24,15 @@ use tracing::{info, warn};
 #[derive(Args, Debug, Clone)]
 pub struct CaptureArgs {
     /// Path to the TOML configuration file.
-    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value_t = String::from(crate::config::DEFAULT_CONFIG_PATH)
+    )]
     pub config: String,
 
     /// Start replication from a specific LSN (overrides saved checkpoint).
-    #[arg(long = "from-lsn")]
+    #[arg(long = "from-lsn", value_parser = validate_lsn_string)]
     pub from_lsn: Option<String>,
 
     /// Force a full snapshot before starting streaming.
@@ -41,6 +46,13 @@ pub struct CaptureArgs {
 
 /// Status line update interval.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Validate an LSN string at the CLI argument parsing boundary.
+fn validate_lsn_string(s: &str) -> Result<String, String> {
+    s.parse::<Lsn>()
+        .map(|_| s.to_string())
+        .map_err(|e| format!("invalid --from-lsn '{s}': {e}"))
+}
 
 /// Run `tap capture`.
 pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
@@ -76,7 +88,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
     let state = Arc::new(Mutex::new(StateStore::open(&config.state)?));
 
     // ── 4. Determine start LSN ───────────────────────────────────────
-    let start_lsn: Option<Lsn> = if let Some(ref lsn_str) = config.capture.from_lsn {
+    let mut start_lsn: Option<Lsn> = if let Some(ref lsn_str) = config.capture.from_lsn {
         info!("Using --from-lsn: {lsn_str}");
         Some(lsn_str.parse::<Lsn>()?)
     } else {
@@ -130,7 +142,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
     }
 
     // ── 8. Snapshot or stream ────────────────────────────────────────
-    if config.capture.snapshot && start_lsn.is_none() {
+    if args.snapshot || (config.capture.snapshot && start_lsn.is_none()) {
+        if args.snapshot && start_lsn.is_some() {
+            warn!("--snapshot overrides existing checkpoint — re-snapshotting from scratch");
+        }
         // Run snapshot
         info!("Starting initial snapshot...");
         {
@@ -150,8 +165,8 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
             .ok();
 
         // Create plain connections for snapshot
-        let (keeper, _keeper_handle) = connect_plain(&config.source).await?;
-        let (worker, _worker_handle) = connect_plain(&config.source).await?;
+        let (keeper, keeper_handle) = connect_plain(&config.source).await?;
+        let (worker, worker_handle) = connect_plain(&config.source).await?;
 
         let mut snapshot_runner = SnapshotRunner::new(
             keeper,
@@ -162,12 +177,20 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
             change_tx.clone(),
         );
 
-        let snapshot_result = snapshot_runner.run().await?;
+        let snapshot_result = snapshot_runner.run().await;
+        // Await background tasks regardless of snapshot outcome
+        let _ = keeper_handle.await;
+        let _ = worker_handle.await;
+        let snapshot_result = snapshot_result?;
+
+        // Update start_lsn so replication resumes from snapshot position
+        start_lsn = Some(snapshot_result.lsn);
 
         info!(
-            "Snapshot complete: {} rows in {} tables",
+            "Snapshot complete: {} rows in {} tables, LSN={}",
             snapshot_result.total_rows,
             snapshot_result.tables_snapshotted.len(),
+            snapshot_result.lsn,
         );
 
         // Send SnapshotComplete SSE event
@@ -207,7 +230,15 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
     }
 
     // ── 9. Start replication stream (stub in v0.1.0) ────────────────
-    let replication_start = start_lsn.unwrap_or(Lsn::ZERO);
+    debug_assert!(
+        start_lsn.is_some() || !config.capture.snapshot,
+        "snapshot ran but start_lsn is still None"
+    );
+    let replication_start = start_lsn.unwrap_or_else(|| {
+        warn!("No start LSN available — starting replication from ZERO (will replay all WAL)");
+        Lsn::ZERO
+    });
+    info!("Starting replication from LSN {replication_start}");
     let _replication_stream = pg
         .start_replication(
             &config.source.slot_name,
@@ -231,11 +262,19 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
     let mut status_interval = tokio::time::interval(STATUS_INTERVAL);
     status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Shutdown signal via watch channel
+    // Shutdown signal via watch channel (SIGINT + SIGTERM)
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        info!("SIGINT received — initiating graceful shutdown...");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT received — initiating graceful shutdown...");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received — initiating graceful shutdown...");
+            }
+        }
         let _ = shutdown_tx.send(true);
     });
 

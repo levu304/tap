@@ -5,8 +5,9 @@
 //! replication slot + publication, then generates TypeScript type
 //! definitions for the captured tables.
 
+use std::os::unix::fs::PermissionsExt;
+
 use clap::Args;
-use tap_core::config::SourceConfig;
 use tap_core::error::TapError;
 use tap_core::postgres::{PgConnection, connect_plain};
 
@@ -73,6 +74,9 @@ state.db.bak
 
 # Local overrides
 config.local.toml
+
+# Main config (contains database credentials)
+config.toml
 ";
 
 /// Content for the `.tap/tap.ts` boilerplate.
@@ -142,24 +146,18 @@ pub async fn run(args: InitArgs) -> Result<(), TapError> {
         )));
     }
     std::fs::write(&config_path, &config_toml)?;
+    // Restrict config file to owner-only read/write
+    let mut perms = std::fs::metadata(&config_path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&config_path, perms)?;
     println!("✓ Wrote {config_path}");
 
     // ── 3. Connect to Postgres (validate credentials) ────────────────
-    let source = SourceConfig {
-        host: args.host.clone(),
-        port: args.port,
-        dbname: args.db.clone(),
-        user: args.user.clone(),
-        password: args.password.clone(),
-        slot_name: args.slot.clone(),
-        publication: args.publication.clone(),
-        tables: args.tables.clone(),
-        plugin: args.plugin.clone(),
-        ssl_mode: Default::default(),
-    };
-
-    let pg = PgConnection::connect(&source).await?;
-    println!("✓ Connected to Postgres at {}:{}", source.host, source.port);
+    let pg = PgConnection::connect(&config.source).await?;
+    println!(
+        "✓ Connected to Postgres at {}:{}",
+        config.source.host, config.source.port
+    );
 
     // ── 4. Ensure replication slot + publication ─────────────────────
     let lsn = pg.ensure_replication_slot().await?;
@@ -179,7 +177,7 @@ pub async fn run(args: InitArgs) -> Result<(), TapError> {
 
     // ── 5. Generate TypeScript type definitions ──────────────────────
     if !args.tables.is_empty() {
-        let (client, _handle) = connect_plain(&source).await?;
+        let (client, _handle) = connect_plain(&config.source).await?;
         let ts_types = generate_typescript_types(&client, &args.tables).await?;
 
         let ts_path = format!("{types_dir}/schema.d.ts");

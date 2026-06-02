@@ -13,7 +13,11 @@ use tap_core::error::TapError;
 #[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
     /// Path to the TOML configuration file.
-    #[arg(short = 'c', long = "config", default_value = ".tap/config.toml")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value_t = String::from(crate::config::DEFAULT_CONFIG_PATH)
+    )]
     pub config: String,
 
     /// Output as JSON schema instead of TypeScript type definitions.
@@ -32,8 +36,6 @@ pub(crate) struct ColumnInfo {
     pub column_name: String,
     pub data_type: String,
     pub is_nullable: bool,
-    #[allow(dead_code)]
-    pub ordinal_position: i32,
 }
 
 /// Map a Postgres data type name to a TypeScript type string.
@@ -102,7 +104,7 @@ pub(crate) async fn query_columns(
 
         let rows = client
             .query(
-                "SELECT column_name, data_type, is_nullable, ordinal_position
+                "SELECT column_name, data_type, is_nullable
                  FROM information_schema.columns
                  WHERE table_schema = $1 AND table_name = $2
                  ORDER BY ordinal_position",
@@ -116,7 +118,6 @@ pub(crate) async fn query_columns(
                 column_name: row.get(0),
                 data_type: row.get(1),
                 is_nullable: row.get::<_, String>(2) == "YES",
-                ordinal_position: row.get(3),
             })
             .collect();
 
@@ -191,7 +192,6 @@ pub(crate) async fn generate_typescript_types(
 }
 
 /// Generate a JSON schema representation of the table columns.
-#[allow(dead_code)]
 pub(crate) async fn generate_json_schema(
     client: &tokio_postgres::Client,
     tables: &[String],
@@ -310,5 +310,5 @@ pub async fn run(args: InspectArgs) -> Result<(), TapError> {
     Ok(())
 }
 
-// Re-export connect_plain so init.rs can use it without a separate import path.
+// Used in run() for plain-text Postgres connections.
 use tap_core::postgres::connect_plain;

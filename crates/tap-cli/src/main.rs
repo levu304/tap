@@ -60,7 +60,7 @@ struct Cli {
     #[arg(
         short = 'c',
         long = "config",
-        default_value = ".tap/config.toml",
+        default_value_t = String::from(crate::config::DEFAULT_CONFIG_PATH),
         global = true,
         help = "Path to TOML configuration file"
     )]
@@ -168,7 +168,6 @@ async fn run_command(cli: Cli) -> Result<(), TapError> {
 /// | 6    | Replication slot error         |
 /// | 7    | State store corruption         |
 /// | 8    | Fatal / unknown error          |
-#[allow(clippy::unnecessary_wraps)]
 fn exit_code_for_error(err: &TapError) -> u8 {
     match err {
         TapError::Config(_) => 1,

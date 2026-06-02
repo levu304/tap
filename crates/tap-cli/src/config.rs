@@ -5,9 +5,13 @@
 
 use crate::commands::init::InitArgs;
 use tap_core::config::{
-    CaptureConfig, LoggingConfig, SinkConfig, SnapshotConfig, SourceConfig, StateConfig, TapConfig,
+    CaptureConfig, LoggingConfig, SinkConfig, SnapshotConfig, SourceConfig, SslMode, StateConfig,
+    TapConfig,
 };
 use tap_core::error::TapError;
+
+/// The default configuration file path, used by all CLI commands.
+pub const DEFAULT_CONFIG_PATH: &str = ".tap/config.toml";
 
 /// Load a [`TapConfig`] from a TOML file at the given path.
 ///
@@ -35,7 +39,7 @@ pub fn config_from_init_args(args: &InitArgs) -> TapConfig {
             publication: args.publication.clone(),
             tables: args.tables.clone(),
             plugin: args.plugin.clone(),
-            ssl_mode: Default::default(),
+            ssl_mode: SslMode::Require,
         },
         sink: SinkConfig::default(),
         capture: CaptureConfig::default(),
