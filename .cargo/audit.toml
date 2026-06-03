@@ -1,2 +1,2 @@
-[advisory]
+[advisories]
 ignore = []  # Empty for v0.1.0, will populate as needed
