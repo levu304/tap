@@ -625,7 +625,7 @@ impl SnapshotRunner {
                    ON a.attrelid = i.indrelid \
                   AND a.attnum = ANY(i.indkey::int2[]) \
                  WHERE i.indrelid = $1::regclass \
-                   AND i.indprimary \
+                   AND i.indisprimary \
                  ORDER BY a.attnum",
                 &[&table.qualified],
             )
