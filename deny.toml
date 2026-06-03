@@ -1,0 +1,46 @@
+# cargo-deny configuration for Tap
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Use the Rust edition 2024 for crate graph analysis
+edition = "2024"
+
+[advisories]
+# Vulnerability check severity threshold
+severity = "high"
+# Advisory notifications only for low severity
+unmaintained = "deny"
+notice = "warn"
+# Ignore specific advisories
+ignore = [
+    # RUSTSEC-2023-0071: memoffset is unmaintained, transitive via napi-rs on x86
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+# Allow these licenses
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "0BSD",
+]
+# Block unlicensed crates
+unlicensed = "deny"
+# Confidence threshold for license detection
+confidence = 0.8
+# Skip certain crates for license checking
+skip = [
+    # core-foundation-sys is macOS-only, skipped on non-macOS platforms
+    { name = "core-foundation-sys", licenses = [] },
+]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]

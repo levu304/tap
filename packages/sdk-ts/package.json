@@ -21,10 +21,12 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "artifacts": "napi artifacts",
-    "prepublishOnly": "napi prepublish -t npm"
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0"
+    "@napi-rs/cli": "^2.18.0",
+    "vitest": "^3.0.0"
   },
   "optionalDependencies": {
     "@tap/sdk-darwin-arm64": "0.1.0",
