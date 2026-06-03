@@ -149,17 +149,15 @@ fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
                 }
             }
             // timestamptz / timestamp — read via with-chrono-0_4 feature
-            1184 | 1114 => {
-                match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i) {
-                    Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => {
-                        return Err(TapError::Decode(format!(
-                            "failed to read timestamp column '{name}' at {i}: {e}"
-                        )));
-                    }
+            1184 | 1114 => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read timestamp column '{name}' at {i}: {e}"
+                    )));
                 }
-            }
+            },
             // Everything else (text, varchar, char, date, time, uuid,
             // inet, bytea, etc.) — read as String.
             _ => read_opt!(String),
