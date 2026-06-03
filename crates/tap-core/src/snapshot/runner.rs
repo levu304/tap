@@ -95,32 +95,74 @@ fn parse_qualified_name(qualified: &str) -> TableInfo {
 
 /// Convert a `tokio_postgres::Row` into a `serde_json::Value::Object`.
 ///
-/// For each column, first tries `serde_json::Value` (handles most built-in
-/// types via the `with-serde_json-1` tokio-postgres feature), falling back
-/// to a `String` representation for unsupported column types.
+/// Determines the Postgres column type via its OID and reads it with the
+/// correct Rust type, then serialises to JSON.  Handles common types:
+/// integer, float, bool, text, json/jsonb, and date/time.  Falls back to
+/// a string representation for unknown types.
 fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
     let columns = row.columns();
     let mut map = serde_json::Map::with_capacity(columns.len());
 
     for (i, col) in columns.iter().enumerate() {
         let name = col.name();
+        let type_oid = col.type_().oid();
 
-        // Try serde_json::Value first (int4, int8, text, bool, json/b, etc.)
-        let value = match row.try_get::<_, Option<serde_json::Value>>(i) {
-            Ok(Some(v)) => v,
-            Ok(None) => serde_json::Value::Null,
-            Err(_) => {
-                // Fallback: string representation
-                match row.try_get::<_, Option<String>>(i) {
-                    Ok(Some(s)) => serde_json::Value::String(s),
+        // Helper: read a column as an Option<T> and convert to JSON
+        macro_rules! read_opt {
+            ($t:ty) => {{
+                match row.try_get::<_, Option<$t>>(i) {
+                    Ok(Some(v)) => serde_json::json!(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => {
                         return Err(TapError::Decode(format!(
-                            "failed to read column '{name}' at index {i}: {e}"
+                            "failed to read column '{name}' at {i}: {e}"
+                        )));
+                    }
+                }
+            }};
+        }
+
+        let value: serde_json::Value = match type_oid {
+            // int8 (bigint / int8)
+            20 => read_opt!(i64),
+            // int2 (smallint / int2)
+            21 => read_opt!(i16),
+            // int4 (integer / serial / int4) and oid
+            23 | 26 => read_opt!(i32),
+            // bool
+            16 => read_opt!(bool),
+            // float4 (real)
+            700 => read_opt!(f32),
+            // float8 (double precision)
+            701 => read_opt!(f64),
+            // json / jsonb
+            114 | 3802 => {
+                // with-serde_json-1 feature handles json(b) → Value
+                match row.try_get::<_, Option<serde_json::Value>>(i) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(TapError::Decode(format!(
+                            "failed to read json column '{name}' at {i}: {e}"
                         )));
                     }
                 }
             }
+            // timestamptz / timestamp — read via with-chrono-0_4 feature
+            1184 | 1114 => {
+                match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i) {
+                    Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(TapError::Decode(format!(
+                            "failed to read timestamp column '{name}' at {i}: {e}"
+                        )));
+                    }
+                }
+            }
+            // Everything else (text, varchar, char, date, time, uuid,
+            // inet, bytea, etc.) — read as String.
+            _ => read_opt!(String),
         };
         map.insert(name.to_string(), value);
     }
