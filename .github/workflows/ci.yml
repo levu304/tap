@@ -162,7 +162,7 @@ jobs:
           cache-dependency-path: packages/sdk-ts/pnpm-lock.yaml
 
       - name: Install SDK dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
         working-directory: packages/sdk-ts
 
       - name: Run SDK tests
