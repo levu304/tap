@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{
-    ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode,
-};
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use tap_core::config;
 use tap_core::event::ChangeEvent;
@@ -254,9 +252,8 @@ impl Tap {
             path: state_path,
             max_backup_size_kb: 10_240,
         };
-        let store = StateStore::open(&state_cfg).map_err(|e| {
-            napi::Error::from_reason(format!("Failed to open state store: {e}"))
-        })?;
+        let store = StateStore::open(&state_cfg)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to open state store: {e}")))?;
 
         Ok(Self {
             inner: Arc::new(tokio::sync::Mutex::new(TapInner::new())),
@@ -289,23 +286,23 @@ impl Tap {
         // ---- 1. Connect to Postgres ----
         let pg = tap_core::postgres::PgConnection::connect(&tap_config.source)
             .await
-            .map_err(|e| {
-                napi::Error::from_reason(format!("Postgres connection failed: {e}"))
-            })?;
+            .map_err(|e| napi::Error::from_reason(format!("Postgres connection failed: {e}")))?;
 
         // ---- 2. Ensure replication slot & publication ----
-        let current_lsn = pg.ensure_replication_slot().await.map_err(|e| {
-            napi::Error::from_reason(format!("Replication slot setup failed: {e}"))
-        })?;
-        pg.ensure_publication().await.map_err(|e| {
-            napi::Error::from_reason(format!("Publication setup failed: {e}"))
-        })?;
+        let current_lsn = pg
+            .ensure_replication_slot()
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("Replication slot setup failed: {e}")))?;
+        pg.ensure_publication()
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("Publication setup failed: {e}")))?;
 
         // ---- 3. Start SSE server ----
         let sse_server = SseServer::new(tap_config.sink.clone());
-        let sse_port = sse_server.start().await.map_err(|e| {
-            napi::Error::from_reason(format!("SSE server start failed: {e}"))
-        })?;
+        let sse_port = sse_server
+            .start()
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("SSE server start failed: {e}")))?;
 
         // ---- 4. Build dual-delivery event bridge ----
         // The bridge receives ChangeEvents (from the WAL reader, once
@@ -479,8 +476,8 @@ impl Tap {
     /// previous handler.
     #[napi]
     pub fn on_change(&self, callback: JsFunction) -> Result<()> {
-        let tsfn: ThreadsafeFunction<JsChangeEvent, ErrorStrategy::Fatal> = callback
-            .create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
+        let tsfn: ThreadsafeFunction<JsChangeEvent, ErrorStrategy::Fatal> =
+            callback.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
         *self.change_tsfn.lock().unwrap() = Some(tsfn);
         Ok(())
     }
@@ -489,8 +486,8 @@ impl Tap {
     /// error.  Only one callback may be registered at a time.
     #[napi]
     pub fn on_error(&self, callback: JsFunction) -> Result<()> {
-        let tsfn: ThreadsafeFunction<String, ErrorStrategy::Fatal> = callback
-            .create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
+        let tsfn: ThreadsafeFunction<String, ErrorStrategy::Fatal> =
+            callback.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
         *self.error_tsfn.lock().unwrap() = Some(tsfn);
         Ok(())
     }
@@ -509,10 +506,7 @@ impl Tap {
             dbname: js.database.clone().unwrap_or_default(),
             user: js.user.clone().unwrap_or_default(),
             password: js.password.clone().unwrap_or_default(),
-            slot_name: js
-                .slot_name
-                .clone()
-                .unwrap_or_else(|| "tap_slot".into()),
+            slot_name: js.slot_name.clone().unwrap_or_else(|| "tap_slot".into()),
             publication: js
                 .publication
                 .clone()
@@ -633,10 +627,10 @@ mod tests {
                 table: "users".into(),
                 lsn: "0/1234567".into(),
                 tx_id: "42".into(),
-            ts_ms: 1_700_000_000_000_f64,
-            snapshot: None,
-        },
-        ts_ms: 1_700_000_000_001_f64,
+                ts_ms: 1_700_000_000_000_f64,
+                snapshot: None,
+            },
+            ts_ms: 1_700_000_000_001_f64,
             id: "0/1234567:42".into(),
         };
         let json = event.to_json();
