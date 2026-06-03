@@ -73,7 +73,13 @@ jobs:
           toolchain: "1.85.0"
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace
-        run: cargo build --workspace
+        # Build with test profile so downstream test jobs reuse artifacts.
+        # --lib compiles all lib tests; --test integration compiles the
+        # integration test binary (including testcontainers) so PG test
+        # jobs don't recompile from cold cache.
+        run: |
+          cargo test --no-run --workspace --lib
+          cargo test --no-run -p tap-core --test integration
 
   # ---------------------------------------------------------------------------
   # Stage 4a: Integration tests (with Postgres, matrix: pg-version)
@@ -82,7 +88,7 @@ jobs:
     name: Test (pg ${{ matrix.pg-version }})
     runs-on: ubuntu-latest
     needs: [build]
-    timeout-minutes: 30
+    timeout-minutes: 10
     strategy:
       matrix:
         pg-version: [14, 15, 16]
