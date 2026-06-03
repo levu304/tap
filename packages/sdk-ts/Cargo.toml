@@ -18,4 +18,4 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "=2.2.0"
