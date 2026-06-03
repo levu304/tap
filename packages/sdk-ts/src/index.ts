@@ -65,8 +65,7 @@ export interface ChangeEvent {
   tsMs: number;
   /** Unique event identifier (`{lsn}:{txId}` for streaming, `snap:...` for snapshot). */
   id: string;
-  /** Serialize this event to a JSON string. */
-  toJson(): string;
+
 }
 
 /** Current capture-engine status. */
@@ -124,6 +123,8 @@ export interface TapConfig {
   maxBatchSize?: number;
   /** Flush interval in milliseconds (default: `1000`). */
   flushIntervalMs?: number;
+  /** TLS encryption mode for the Postgres connection (`"disable"`, `"require"`, `"verify-ca"`, or `"verify-full"`; default: `"disable"`). */
+  sslMode?: string;
   /** Optional SSE sink configuration. */
   sink?: SinkConfig;
 }
@@ -241,7 +242,7 @@ export class Tap {
 function normalizeConfig(config: TapConfig): Record<string, unknown> {
   return {
     connection: config.connection,
-    slotName: config.slotName,
+    slot_name: config.slotName,
     publication: config.publication,
     tables: config.tables,
     plugin: config.plugin,
@@ -250,11 +251,33 @@ function normalizeConfig(config: TapConfig): Record<string, unknown> {
     database: config.database,
     user: config.user,
     password: config.password,
-    statePath: config.statePath,
-    maxBatchSize: config.maxBatchSize,
-    flushIntervalMs: config.flushIntervalMs,
-    sink: config.sink,
+    state_path: config.statePath,
+    max_batch_size: config.maxBatchSize,
+    flush_interval_ms: config.flushIntervalMs,
+    ssl_mode: config.sslMode,
+    sink: config.sink
+      ? {
+          host: config.sink.host,
+          port: config.sink.port,
+          max_buffer_size: config.sink.maxBufferSize,
+          heartbeat_interval_ms: config.sink.heartbeatIntervalMs,
+        }
+      : undefined,
   };
+}
+
+/**
+ * Serialize a {@link ChangeEvent} to a JSON string.
+ *
+ * This is a standalone function (not a method) because napi-rs delivers
+ * `#[napi(object)]` structs as plain JS objects, so instance methods
+ * are not available at runtime on callback-delivered events.
+ *
+ * @param event - The change event to serialize.
+ * @returns A JSON representation of the event.
+ */
+export function changeEventToJson(event: ChangeEvent): string {
+  return JSON.stringify(event, null, 2);
 }
 
 // ---------------------------------------------------------------------------

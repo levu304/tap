@@ -16,6 +16,7 @@ napi-derive.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tokio-postgres.workspace = true
 
 [build-dependencies]
 napi-build = "=2.2.0"
