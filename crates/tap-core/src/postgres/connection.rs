@@ -101,14 +101,14 @@ impl<'de> Deserialize<'de> for Lsn {
 /// Build a connection string from [`SourceConfig`] suitable for
 /// `tokio-postgres`.
 ///
-/// Includes `options=--replication=database` to request walsender mode
-/// (logical replication backend).  The value is **not** quoted with single
-/// quotes because `tokio-postgres` passes the `options` value verbatim to
-/// the PostgreSQL server's startup packet — libpq quoting syntax does not
-/// apply.
+/// Note: `tokio-postgres` 0.7 does not support the `replication` connection
+/// parameter in the startup message, so `options=--replication=database`
+/// does **not** work as intended.  We omit it here and will add it back
+/// properly when we upgrade to tokio-postgres 0.8+ (which has `copy_both`
+/// support and can handle the replication startup message correctly).
 fn connection_string(config: &SourceConfig) -> String {
     format!(
-        "host={} port={} dbname={} user={} password={} options=--replication=database",
+        "host={} port={} dbname={} user={} password={}",
         config.host, config.port, config.dbname, config.user, config.password,
     )
 }
@@ -128,7 +128,7 @@ fn connection_string_plain(config: &SourceConfig) -> String {
 /// The password value is replaced with `<REDACTED>`.
 fn redacted_connection_string(config: &SourceConfig) -> String {
     format!(
-        "host={} port={} dbname={} user={} password=<REDACTED> options=--replication=database",
+        "host={} port={} dbname={} user={} password=<REDACTED>",
         config.host, config.port, config.dbname, config.user,
     )
 }
@@ -658,7 +658,7 @@ mod tests {
     // ── Connection string ────────────────────────────────────────────────
 
     #[test]
-    fn test_connection_string_includes_replication_option() {
+    fn test_connection_string_omits_replication_option() {
         let config = SourceConfig {
             host: "pg.example.com".into(),
             port: 5432,
@@ -673,7 +673,10 @@ mod tests {
         assert!(conn_str.contains("dbname=testdb"));
         assert!(conn_str.contains("user=replicator"));
         assert!(conn_str.contains("password=s3cret"));
-        assert!(conn_str.contains("options=--replication=database"));
+        assert!(
+            !conn_str.contains("--replication"),
+            "replication option omitted per tokio-postgres 0.7 limitation: {conn_str}"
+        );
     }
 
     #[test]

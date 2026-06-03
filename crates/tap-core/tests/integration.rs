@@ -244,7 +244,7 @@ async fn test_harness_create_table_and_insert() {
     pg.create_test_table("harness_test").await;
     pg.insert_rows("harness_test", &[("test1", 10), ("test2", 20)])
         .await;
-    let count = pg.query("SELECT count(*) FROM harness_test").await;
+    let count = pg.query("SELECT count(*)::text FROM harness_test").await;
     assert_eq!(count, vec!["2"], "should have inserted 2 rows");
 }
 
