@@ -151,8 +151,10 @@ jobs:
         env:
           TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
           PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
+          RUST_BACKTRACE: 1
         # Run in separate step so cargo doesn't run test binaries in parallel
-        run: cargo test -p tap-core --test integration -- --test-threads=1
+        # Use --nocapture to ensure output is flushed immediately
+        run: cargo test -p tap-core --test integration -- --test-threads=1 --nocapture
 
   # ---------------------------------------------------------------------------
   # Stage 4b: Unit tests (no Postgres needed, matrix: os)

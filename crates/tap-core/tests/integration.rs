@@ -286,6 +286,14 @@ async fn drop_decoding_slot(pg: &TestPg, slot_name: &str) {
         .await;
 }
 
+/// Quick sanity test that runs first to verify test harness works.
+#[tokio::test]
+async fn test_harness_sanity_check() {
+    eprintln!("test_harness_sanity_check: starting");
+    assert_eq!(1 + 1, 2);
+    eprintln!("test_harness_sanity_check: done");
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
