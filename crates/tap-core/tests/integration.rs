@@ -15,6 +15,7 @@
 //! Every test generates unique table / slot / publication names so they
 //! can run concurrently (or sequentially against a shared container).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -143,13 +144,19 @@ impl TestPg {
         .await;
     }
 
-    /// Insert sample rows into a test table.
+    /// Insert sample rows into a test table using parameterized queries.
     async fn insert_rows(&self, table_name: &str, rows: &[(&str, i64)]) {
-        for (name, value) in rows {
-            self.execute(&format!(
-                "INSERT INTO {table_name} (name, value) VALUES ('{name}', {value})"
-            ))
-            .await;
+        let (client, connection) =
+            tokio_postgres::connect(self.connection_string(), tokio_postgres::NoTls)
+                .await
+                .expect("connect to postgres");
+        tokio::spawn(connection);
+        for &(name, value) in rows {
+            let sql = format!("INSERT INTO {table_name} (name, value) VALUES ($1, $2)");
+            client
+                .execute(&sql, &[&name, &value])
+                .await
+                .expect("insert row");
         }
     }
 }
@@ -170,6 +177,11 @@ fn get_test_pg() -> &'static TestPg {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Monotonically increasing counter appended to each generated test name
+/// to prevent collisions when concurrent tests request names at the same
+/// nanosecond.
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Generate a unique, Postgres-safe identifier with the given prefix.
 ///
 /// The returned string contains only alphanumeric characters (a-f, 0-9) and
@@ -180,6 +192,7 @@ fn test_name(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_nanos();
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     // Last 12 hex chars — unique enough for a single test run.
     let hex_id = format!("{nanos:x}");
     let suffix = if hex_id.len() > 12 {
@@ -187,7 +200,46 @@ fn test_name(prefix: &str) -> String {
     } else {
         &hex_id
     };
-    format!("{prefix}_{suffix}")
+    format!("{prefix}_{suffix}_{counter}")
+}
+
+/// Guard that drops a replication slot when it goes out of scope.
+///
+/// Used to prevent slot leaks when tests panic after creating a slot.
+/// Connects directly via the stored connection string and issues
+/// `pg_drop_replication_slot` on Drop.
+struct SlotGuard {
+    pg_conn_str: String,
+    slot_name: String,
+}
+
+impl SlotGuard {
+    fn new(pg: &TestPg, slot_name: &str) -> Self {
+        Self {
+            pg_conn_str: pg.connection_string().to_string(),
+            slot_name: slot_name.to_string(),
+        }
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let conn_str = self.pg_conn_str.clone();
+        let slot = self.slot_name.clone();
+        // Use a dedicated runtime since Drop may run outside the test's
+        // async context (e.g. during panic unwinding).
+        if let Ok(rt) = tokio::runtime::Runtime::new() {
+            rt.block_on(async {
+                if let Ok((client, connection)) =
+                    tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await
+                {
+                    tokio::spawn(connection);
+                    let sql = format!("SELECT pg_drop_replication_slot('{slot}')");
+                    let _ = client.simple_query(&sql).await;
+                }
+            });
+        }
+    }
 }
 
 /// Create a logical replication slot using `test_decoding` and return all

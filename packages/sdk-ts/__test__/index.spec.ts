@@ -4,6 +4,7 @@
  * NOTE: These are stub tests. They will be expanded by the qa-expert agent.
  */
 import { describe, it, expect } from "vitest";
+import { normalizeConfig } from "../src/index";
 
 // ---------------------------------------------------------------------------
 // Stub: mock the napi binding for unit-test purposes
@@ -59,11 +60,11 @@ class MockTapBinding {
 // For CI without a native build, we test the config-normalization logic.
 
 // ---------------------------------------------------------------------------
-// Config normalization tests
+// Config normalization tests (calls real normalizeConfig)
 // ---------------------------------------------------------------------------
 
 describe("Tap config normalization", () => {
-  it("converts camelCase config to snake_case", () => {
+  it("converts camelCase config to snake_case using normalizeConfig", () => {
     const config = {
       connection: "postgresql://localhost:5432/test",
       slotName: "my_slot",
@@ -87,32 +88,17 @@ describe("Tap config normalization", () => {
       },
     };
 
-    const normalized = {
-      connection: config.connection,
-      slot_name: config.slotName,
-      publication: config.publication,
-      tables: config.tables,
-      plugin: config.plugin,
-      host: config.host,
-      port: config.port,
-      database: config.database,
-      user: config.user,
-      password: config.password,
-      state_path: config.statePath,
-      max_batch_size: config.maxBatchSize,
-      flush_interval_ms: config.flushIntervalMs,
-      ssl_mode: config.sslMode,
-      sink: {
-        host: config.sink.host,
-        port: config.sink.port,
-        max_buffer_size: config.sink.maxBufferSize,
-        heartbeat_interval_ms: config.sink.heartbeatIntervalMs,
-      },
-    };
+    const normalized = normalizeConfig(config);
 
     expect(normalized.connection).toBe("postgresql://localhost:5432/test");
     expect(normalized.slot_name).toBe("my_slot");
-    expect(normalized.sink!.max_buffer_size).toBe(5000);
+    expect(normalized.host).toBe("localhost");
+    expect(normalized.port).toBe(5432);
+    expect(normalized.ssl_mode).toBe("disable");
+    expect(normalized.max_batch_size).toBe(200);
+    expect(normalized.flush_interval_ms).toBe(500);
+    expect((normalized.sink as Record<string, unknown>).max_buffer_size).toBe(5000);
+    expect((normalized.sink as Record<string, unknown>).heartbeat_interval_ms).toBe(15000);
   });
 });
 

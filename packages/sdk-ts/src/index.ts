@@ -238,8 +238,10 @@ export class Tap {
 /**
  * Convert the public `TapConfig` (camelCase) to the native form
  * (snake_case) expected by the napi-rs binding.
+ *
+ * @internal Exported for testing only — not part of the public API.
  */
-function normalizeConfig(config: TapConfig): Record<string, unknown> {
+export function normalizeConfig(config: TapConfig): Record<string, unknown> {
   return {
     connection: config.connection,
     slot_name: config.slotName,

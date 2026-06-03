@@ -57,7 +57,8 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 # Check Postgres connectivity
-echo "Testing Postgres connection to: $TEST_DB"
+# Redact password in log output
+echo "Testing Postgres connection to: $(echo "$TEST_DB" | sed 's/:[^:@]*@/:****@/')"
 if ! psql "$TEST_DB" -c "SELECT 1" &>/dev/null; then
     echo "ERROR: Cannot connect to Postgres at $TEST_DB"
     echo "       Ensure Postgres is running and the connection string is correct."
@@ -194,11 +195,8 @@ fi
 if echo "$CAPTURE_OUTPUT" | grep -qi "snapshot\|ChangeEvent\|event"; then
     echo "SUCCESS: Events were captured during the test run"
 else
-    echo "WARNING: No snapshot/event messages found in output"
-    echo "         This may be expected if capture doesn't emit to stdout."
-    echo "         Check the output above for any captured events."
+    echo "FAILURE: No snapshot/event messages found in output"
+    echo "         At least one CDC event is expected (3 rows were pre-inserted"
+    echo "         and snapshot mode is enabled)."
+    exit 1
 fi
-
-# Check that the test data was processed (if state store has records)
-echo "=== Test completed successfully ==="
-exit 0

@@ -36,6 +36,7 @@ jobs:
         with:
           toolchain: "1.85.0"
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
   # ---------------------------------------------------------------------------
@@ -51,6 +52,7 @@ jobs:
         with:
           toolchain: "1.85.0"
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
 
   # ---------------------------------------------------------------------------
@@ -69,6 +71,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
       - name: Build workspace
         run: cargo build --workspace
 
@@ -87,7 +90,7 @@ jobs:
       postgres:
         image: postgres:${{ matrix.pg-version }}
         env:
-          POSTGRES_PASSWORD: tap_test
+          POSTGRES_PASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
           POSTGRES_DB: tap_test
         options: >-
           --health-cmd pg_isready
@@ -101,6 +104,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
 
       - name: Configure Postgres for logical replication
         run: |
@@ -125,9 +129,9 @@ jobs:
 
       - name: Run workspace tests
         env:
-          TAP_TEST_DB: postgres://postgres:tap_test@localhost:5432/tap_test
-          PGPASSWORD: tap_test
-        run: cargo test --workspace
+          TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
+          PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
+        run: cargo test --workspace -- --test-threads=1
 
   # ---------------------------------------------------------------------------
   # Stage 4b: Unit tests (no Postgres needed, matrix: os)
@@ -145,6 +149,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
 
       - name: Run library tests
         run: cargo test --lib --workspace
@@ -181,6 +186,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -209,7 +215,7 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: tap_test
+          POSTGRES_PASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
           POSTGRES_DB: tap_test
         options: >-
           --health-cmd pg_isready
@@ -223,6 +229,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
 
       - name: Configure Postgres for logical replication
         run: |
@@ -247,6 +254,6 @@ jobs:
 
       - name: Run E2E test
         env:
-          TAP_TEST_DB: postgres://postgres:tap_test@localhost:5432/tap_test
-          PGPASSWORD: tap_test
+          TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
+          PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
         run: ./scripts/e2e-test.sh

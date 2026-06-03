@@ -102,22 +102,12 @@ impl<'de> Deserialize<'de> for Lsn {
 /// `tokio-postgres`.
 ///
 /// Note: `tokio-postgres` 0.7 does not support the `replication` connection
-/// parameter in the startup message, so `options=--replication=database`
-/// does **not** work as intended.  We omit it here and will add it back
-/// properly when we upgrade to tokio-postgres 0.8+ (which has `copy_both`
-/// support and can handle the replication startup message correctly).
+/// parameter in the startup message, so options like `--replication=database`
+/// do **not** work as intended.  We omit replication options here and would
+/// add them properly when we upgrade to tokio-postgres 0.8+ (which has
+/// `copy_both` support and can handle the replication startup message
+/// correctly).
 fn connection_string(config: &SourceConfig) -> String {
-    format!(
-        "host={} port={} dbname={} user={} password={}",
-        config.host, config.port, config.dbname, config.user, config.password,
-    )
-}
-
-/// Build a plain (non-replication) connection string from [`SourceConfig`].
-///
-/// Suitable for ordinary SQL queries (catalog lookups, table scans, snapshot
-/// operations).  Does **not** include the `--replication=database` option.
-fn connection_string_plain(config: &SourceConfig) -> String {
     format!(
         "host={} port={} dbname={} user={} password={}",
         config.host, config.port, config.dbname, config.user, config.password,
@@ -162,8 +152,9 @@ impl PgConnection {
     /// ([`SslMode`]), spawns the background connection handler, and returns
     /// a [`PgConnection`] ready for replication operations.
     ///
-    /// The connection string includes `options=--replication=database` to
-    /// enable logical replication mode.
+    /// Note: tokio-postgres 0.7 does not support the `replication` connection
+    /// parameter, so `--replication=database` is not included.  It will be
+    /// added when we upgrade to tokio-postgres 0.8+.
     ///
     /// # Errors
     ///
@@ -466,7 +457,7 @@ impl PgConnection {
 pub async fn connect_plain(
     config: &SourceConfig,
 ) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), TapError> {
-    let conn_str = connection_string_plain(config);
+    let conn_str = connection_string(config);
     let redacted = format!(
         "host={} port={} dbname={} user={} password=<REDACTED>",
         config.host, config.port, config.dbname, config.user,
@@ -819,28 +810,6 @@ mod tests {
     // ── Plain connection strings ──────────────────────────────────────────
 
     #[test]
-    fn test_plain_connection_string_omits_replication_option() {
-        let config = SourceConfig {
-            host: "pg.example.com".into(),
-            port: 5432,
-            dbname: "testdb".into(),
-            user: "replicator".into(),
-            password: "s3cret".into(),
-            ..SourceConfig::default()
-        };
-        let conn_str = connection_string_plain(&config);
-        assert!(conn_str.contains("host=pg.example.com"));
-        assert!(conn_str.contains("port=5432"));
-        assert!(conn_str.contains("dbname=testdb"));
-        assert!(conn_str.contains("user=replicator"));
-        assert!(conn_str.contains("password=s3cret"));
-        assert!(
-            !conn_str.contains("--replication"),
-            "plain connection should NOT contain --replication: {conn_str}"
-        );
-    }
-
-    #[test]
     fn test_plain_connection_string_with_tls() {
         let config = SourceConfig {
             host: "pg.example.com".into(),
@@ -851,7 +820,7 @@ mod tests {
             ssl_mode: crate::config::SslMode::Require,
             ..SourceConfig::default()
         };
-        let conn_str = connection_string_plain(&config);
+        let conn_str = connection_string(&config);
         assert!(conn_str.contains("host=pg.example.com"));
         assert!(conn_str.contains("password=s3cret"));
         assert!(!conn_str.contains("--replication"));
