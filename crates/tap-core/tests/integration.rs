@@ -18,7 +18,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use testcontainers::{clients::Cli, core::WaitFor, Container, GenericImage};
+use testcontainers::{Container, GenericImage, clients::Cli, core::WaitFor};
 
 /// Postgres image to use for all integration tests.
 const PG_IMAGE: &str = "postgres";
@@ -105,12 +105,10 @@ impl TestPg {
 
     /// Execute arbitrary SQL (DDL / DML that does not return rows).
     async fn execute(&self, sql: &str) {
-        let (client, connection) = tokio_postgres::connect(
-            self.connection_string(),
-            tokio_postgres::NoTls,
-        )
-        .await
-        .expect("connect to postgres");
+        let (client, connection) =
+            tokio_postgres::connect(self.connection_string(), tokio_postgres::NoTls)
+                .await
+                .expect("connect to postgres");
         tokio::spawn(connection);
         client.batch_execute(sql).await.expect("execute sql");
     }
@@ -118,19 +116,18 @@ impl TestPg {
     /// Execute a query that returns rows.  Returns the first column of
     /// every row as a `String` (panics if a value is not coercible).
     async fn query(&self, sql: &str) -> Vec<String> {
-        let (client, connection) = tokio_postgres::connect(
-            self.connection_string(),
-            tokio_postgres::NoTls,
-        )
-        .await
-        .expect("connect to postgres");
+        let (client, connection) =
+            tokio_postgres::connect(self.connection_string(), tokio_postgres::NoTls)
+                .await
+                .expect("connect to postgres");
         tokio::spawn(connection);
         let rows = client.query(sql, &[]).await.expect("query failed");
-        rows.iter().map(|row| {
-            let val: String = row.get(0);
-            val
-        })
-        .collect()
+        rows.iter()
+            .map(|row| {
+                let val: String = row.get(0);
+                val
+            })
+            .collect()
     }
 
     /// Create a test table with some sample data.
@@ -221,10 +218,8 @@ async fn create_decoding_slot(pg: &TestPg, slot_name: &str) {
 
 /// Drop a `test_decoding` logical replication slot.
 async fn drop_decoding_slot(pg: &TestPg, slot_name: &str) {
-    pg.execute(&format!(
-        "SELECT pg_drop_replication_slot('{slot_name}')"
-    ))
-    .await;
+    pg.execute(&format!("SELECT pg_drop_replication_slot('{slot_name}')"))
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +244,7 @@ async fn test_harness_create_table_and_insert() {
     pg.create_test_table("harness_test").await;
     pg.insert_rows("harness_test", &[("test1", 10), ("test2", 20)])
         .await;
-    let count = pg
-        .query("SELECT count(*) FROM harness_test")
-        .await;
+    let count = pg.query("SELECT count(*) FROM harness_test").await;
     assert_eq!(count, vec!["2"], "should have inserted 2 rows");
 }
 
@@ -302,14 +295,9 @@ async fn test_create_replication_slot() {
     drop_decoding_slot(pg, &slot).await;
     pg.execute(&format!("DROP PUBLICATION IF EXISTS \"{pub_name}\""))
         .await;
-    let slots = pg
-        .query("SELECT slot_name FROM pg_replication_slots")
-        .await;
+    let slots = pg.query("SELECT slot_name FROM pg_replication_slots").await;
     let pubs = pg.query("SELECT pubname FROM pg_publication").await;
-    assert!(
-        !slots.iter().any(|s| s == &slot),
-        "slot should be dropped"
-    );
+    assert!(!slots.iter().any(|s| s == &slot), "slot should be dropped");
     assert!(
         !pubs.iter().any(|p| p == &pub_name),
         "publication should be dropped"
@@ -462,11 +450,8 @@ async fn test_snapshot_produces_read_events() {
     pg.create_test_table(&table).await;
 
     // Pre-populate rows (the "existing data" the snapshot should read)
-    pg.insert_rows(
-        &table,
-        &[("alpha", 10), ("bravo", 20), ("charlie", 30)],
-    )
-    .await;
+    pg.insert_rows(&table, &[("alpha", 10), ("bravo", 20), ("charlie", 30)])
+        .await;
 
     // Verify data is accessible via SQL (snapshot read)
     let rows = pg
