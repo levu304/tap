@@ -948,6 +948,9 @@ async fn test_snapshot_runner_captures_existing_rows() {
         .collect();
     assert_eq!(names, vec!["alpha", "bravo", "charlie", "delta", "echo"]);
 
+    // Drop runner first to release both Clients → driver tasks can finish
+    drop(runner);
+
     // Await background tasks
     let _ = keeper_handle.await;
     let _ = worker_handle.await;
