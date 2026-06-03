@@ -182,7 +182,9 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         );
 
         let snapshot_result = snapshot_runner.run().await;
-        // Await background tasks regardless of snapshot outcome
+        // Drop runner to release Clients before awaiting handles, preventing
+        // a tokio self-deadlock (handles resolve only after Client is dropped).
+        drop(snapshot_runner);
         let _ = keeper_handle.await;
         let _ = worker_handle.await;
         let snapshot_result = snapshot_result?;
