@@ -186,24 +186,69 @@ fn build_snapshot_event_id(
         return Ok(format!("{}:{}", prefix, Uuid::new_v4()));
     }
 
-    let mut parts = Vec::with_capacity(pk_columns.len());
-    for pk in pk_columns {
-        let val = match row.try_get::<_, Option<serde_json::Value>>(pk.as_str()) {
-            Ok(Some(v)) => v.to_string(),
-            Ok(None) => "NULL".to_string(),
-            Err(_) => {
-                // Fallback: try as string
-                match row.try_get::<_, Option<String>>(pk.as_str()) {
-                    Ok(Some(s)) => serde_json::Value::String(s).to_string(),
-                    Ok(None) => "NULL".to_string(),
-                    Err(e) => {
-                        return Err(TapError::Decode(format!(
-                            "failed to read PK column '{pk}' for event ID: {e}"
-                        )));
-                    }
+    // Macro: read PK column by type OID and convert to string
+    macro_rules! pk_str {
+        ($row:expr, $idx:expr, $t:ty) => {{
+            match $row.try_get::<_, Option<$t>>($idx) {
+                Ok(Some(v)) => v.to_string(),
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK column for event ID: {e}"
+                    )));
                 }
             }
+        }};
+    }
+
+    let columns = row.columns();
+    let mut parts = Vec::with_capacity(pk_columns.len());
+
+    for pk in pk_columns {
+        // Find column index by name
+        let idx = columns
+            .iter()
+            .position(|c| c.name() == pk.as_str())
+            .ok_or_else(|| {
+                TapError::Decode(format!("PK column '{pk}' not found in row columns"))
+            })?;
+        let type_oid = columns[idx].type_().oid();
+
+        let val = match type_oid {
+            // int8 (bigint)
+            20 => pk_str!(row, idx, i64),
+            // int2 (smallint)
+            21 => pk_str!(row, idx, i16),
+            // int4 / serial / oid
+            23 | 26 => pk_str!(row, idx, i32),
+            // bool
+            16 => pk_str!(row, idx, bool),
+            // float4
+            700 => pk_str!(row, idx, f32),
+            // float8
+            701 => pk_str!(row, idx, f64),
+            // timestamptz / timestamp
+            1184 | 1114 => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx) {
+                Ok(Some(v)) => v.to_rfc3339(),
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK timestamp column '{pk}' for event ID: {e}"
+                    )));
+                }
+            },
+            // Everything else — read as String
+            _ => match row.try_get::<_, Option<String>>(idx) {
+                Ok(Some(s)) => s,
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK column '{pk}' for event ID: {e}"
+                    )));
+                }
+            },
         };
+
         parts.push(format!("{pk}={val}"));
     }
 
