@@ -820,6 +820,31 @@ async fn test_state_store_snapshot_progress() {
 // SnapshotRunner integration (requires Postgres)
 // ---------------------------------------------------------------------------
 
+/// Quick test to verify connect_plain works with the CI Postgres service.
+/// Must pass BEFORE test_snapshot_runner_captures_existing_rows so we can
+/// isolate whether the snapshot runner hang is in connect_plain or later.
+#[tokio::test]
+async fn test_snapshot_connect_plain_smoke() {
+    use tap_core::postgres::connect_plain;
+    let pg = get_test_pg();
+    let conn_str = pg.connection_string();
+    let table = test_name("t_conn_smoke");
+    let slot = test_name("slot_conn_smoke");
+    let cfg = source_config_from_conn_str(conn_str, &slot, &table);
+
+    let (client, handle) = connect_plain(&cfg)
+        .await
+        .expect("connect_plain should succeed");
+    let row = client
+        .query_one("SELECT 1 AS ok", &[])
+        .await
+        .expect("query should succeed");
+    let val: i32 = row.get(0);
+    assert_eq!(val, 1, "connect_plain smoke test should work");
+    drop(client);
+    handle.await.ok();
+}
+
 /// Test that SnapshotRunner correctly snapshots pre-existing rows from a
 /// real Postgres table and emits Read events with the expected structure.
 #[tokio::test]
