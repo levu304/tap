@@ -129,6 +129,8 @@ jobs:
           done
 
       - name: Verify Postgres is reachable
+        env:
+          PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
         run: |
           psql -h localhost -U postgres -d tap_test -c "SELECT version(), current_setting('wal_level') AS wal_level;"
           psql -h localhost -U postgres -d tap_test -c "SELECT 1 AS alive;"
