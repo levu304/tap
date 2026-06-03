@@ -353,7 +353,7 @@ impl PgConnection {
         for table in &self.config.tables {
             let row = self
                 .client
-                .query_one("SELECT to_regclass($1)", &[table])
+                .query_one("SELECT to_regclass($1)::text", &[table])
                 .await?;
             let regclass: Option<String> = row.get(0);
             if regclass.is_none() {
