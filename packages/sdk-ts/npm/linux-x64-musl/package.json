@@ -1,0 +1,13 @@
+{
+  "name": "@tap/sdk-linux-x64-musl",
+  "version": "0.1.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["musl"],
+  "main": "tap-sdk.linux-x64-musl.node",
+  "files": ["tap-sdk.linux-x64-musl.node"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

@@ -1,11 +1,9 @@
-[workspace]
-
 [package]
 name = "tap-sdk"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "napi-rs bindings for the Tap CDC engine"
 
 [lib]
@@ -13,8 +11,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tap-core = { path = "../../crates/tap-core" }
-napi = { version = "2", features = ["default"] }
-napi-derive = "2"
+napi.workspace = true
+napi-derive.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 [build-dependencies]
 napi-build = "2"

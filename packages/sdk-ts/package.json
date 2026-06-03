@@ -7,14 +7,30 @@
   "napi": {
     "name": "tap-sdk",
     "triples": {
-      "defaults": true
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl"
+      ]
     }
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "build:debug": "napi build --platform",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"
+  },
+  "optionalDependencies": {
+    "@tap/sdk-darwin-arm64": "0.1.0",
+    "@tap/sdk-darwin-x64": "0.1.0",
+    "@tap/sdk-linux-arm64-gnu": "0.1.0",
+    "@tap/sdk-linux-x64-gnu": "0.1.0",
+    "@tap/sdk-linux-x64-musl": "0.1.0"
   }
 }
