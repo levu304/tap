@@ -23,11 +23,17 @@
  * ```
  */
 
-// The auto-generated bindings are loaded from `index.js` after `napi build`.
-// During development / type-checking, `./binding` resolves after a build.
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const binding = require("./binding");
+// The auto-generated bindings are loaded after `napi build`.
+// Use lazy init so pure functions (normalizeConfig, changeEventToJson)
+// can be imported without the native binary, enabling unit tests.
+let _binding: any;
+function getBinding(): any {
+  if (!_binding) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    _binding = require("./binding");
+  }
+  return _binding;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -141,7 +147,7 @@ export interface TapConfig {
  * and in-process JS callbacks.
  */
 export class Tap {
-  private inner: InstanceType<typeof binding.Tap>;
+  private inner: InstanceType<any>;
 
   /**
    * Create a new Tap instance.
@@ -152,6 +158,7 @@ export class Tap {
    * @param config - Capture session configuration.
    */
   constructor(config: TapConfig) {
+    const binding = getBinding();
     this.inner = new binding.Tap(normalizeConfig(config));
   }
 

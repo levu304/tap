@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import { normalizeConfig } from "../src/index";
 
 // ---------------------------------------------------------------------------
-// Stub: mock the napi binding for unit-test purposes
+// Mock binding (for lifecycle tests that exercise the Tap class)
 // ---------------------------------------------------------------------------
 
 /** Minimal mock of the Tap native binding. */
@@ -55,9 +55,6 @@ class MockTapBinding {
     this.errorHandler = handler;
   }
 }
-
-// To test real Tap, we'd need the native module built.
-// For CI without a native build, we test the config-normalization logic.
 
 // ---------------------------------------------------------------------------
 // Config normalization tests (calls real normalizeConfig)
@@ -155,7 +152,6 @@ describe("Tap lifecycle", () => {
 
 describe("Tap error handling", () => {
   it("handles invalid config gracefully", () => {
-    // An empty connection string is a config error
     const mock = new MockTapBinding({
       connection: "",
     });
