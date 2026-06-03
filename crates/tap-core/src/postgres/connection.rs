@@ -101,20 +101,13 @@ impl<'de> Deserialize<'de> for Lsn {
 /// Build a connection string from [`SourceConfig`] suitable for
 /// `tokio-postgres`.
 ///
-/// Includes the `options=--replication=database` parameter required for
-/// logical replication connections.
+/// Note: `tokio-postgres` 0.7 does not support the `replication` connection
+/// parameter in the startup message, so options like `--replication=database`
+/// do **not** work as intended.  We omit replication options here and would
+/// add them properly when we upgrade to tokio-postgres 0.8+ (which has
+/// `copy_both` support and can handle the replication startup message
+/// correctly).
 fn connection_string(config: &SourceConfig) -> String {
-    format!(
-        "host={} port={} dbname={} user={} password={} options='--replication=database'",
-        config.host, config.port, config.dbname, config.user, config.password,
-    )
-}
-
-/// Build a plain (non-replication) connection string from [`SourceConfig`].
-///
-/// Suitable for ordinary SQL queries (catalog lookups, table scans, snapshot
-/// operations).  Does **not** include the `--replication=database` option.
-fn connection_string_plain(config: &SourceConfig) -> String {
     format!(
         "host={} port={} dbname={} user={} password={}",
         config.host, config.port, config.dbname, config.user, config.password,
@@ -125,7 +118,7 @@ fn connection_string_plain(config: &SourceConfig) -> String {
 /// The password value is replaced with `<REDACTED>`.
 fn redacted_connection_string(config: &SourceConfig) -> String {
     format!(
-        "host={} port={} dbname={} user={} password=<REDACTED> options='--replication=database'",
+        "host={} port={} dbname={} user={} password=<REDACTED>",
         config.host, config.port, config.dbname, config.user,
     )
 }
@@ -159,8 +152,9 @@ impl PgConnection {
     /// ([`SslMode`]), spawns the background connection handler, and returns
     /// a [`PgConnection`] ready for replication operations.
     ///
-    /// The connection string includes `options=--replication=database` to
-    /// enable logical replication mode.
+    /// Note: tokio-postgres 0.7 does not support the `replication` connection
+    /// parameter, so `--replication=database` is not included.  It will be
+    /// added when we upgrade to tokio-postgres 0.8+.
     ///
     /// # Errors
     ///
@@ -275,12 +269,23 @@ impl PgConnection {
             return Ok(lsn);
         }
 
-        // Create the slot using pgoutput plugin
-        let create_sql = format!("CREATE_REPLICATION_SLOT \"{slot_name}\" LOGICAL pgoutput");
+        // Create the slot using pgoutput plugin.
+        // Uses the SQL function pg_create_logical_replication_slot() instead of
+        // the replication-protocol CREATE_REPLICATION_SLOT command because
+        // tokio-postgres 0.7 does not support the `replication=database`
+        // connection parameter needed for protocol-level commands.
         info!("creating replication slot '{slot_name}'");
-        self.client.simple_query(&create_sql).await?;
-        info!("created replication slot '{slot_name}'");
-        Ok(Lsn::ZERO)
+        let row = self
+            .client
+            .query_one(
+                "SELECT lsn::text FROM pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[slot_name],
+            )
+            .await?;
+        let lsn_str: String = row.get(0);
+        let lsn = Lsn::from_str(&lsn_str)?;
+        info!("created replication slot '{slot_name}' at LSN {lsn}");
+        Ok(lsn)
     }
 
     /// Ensure the publication exists.
@@ -327,7 +332,14 @@ impl PgConnection {
         } else {
             let table_list = tables
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| {
+                    // Split schema-qualified names (e.g. "public.table")
+                    // so each part is quoted separately: "public"."table"
+                    t.split('.')
+                        .map(|part| format!("\"{part}\""))
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!("CREATE PUBLICATION \"{pub_name}\" FOR TABLE {table_list}");
@@ -350,7 +362,7 @@ impl PgConnection {
         for table in &self.config.tables {
             let row = self
                 .client
-                .query_one("SELECT to_regclass($1)", &[table])
+                .query_one("SELECT to_regclass($1)::text", &[table])
                 .await?;
             let regclass: Option<String> = row.get(0);
             if regclass.is_none() {
@@ -463,7 +475,7 @@ impl PgConnection {
 pub async fn connect_plain(
     config: &SourceConfig,
 ) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), TapError> {
-    let conn_str = connection_string_plain(config);
+    let conn_str = connection_string(config);
     let redacted = format!(
         "host={} port={} dbname={} user={} password=<REDACTED>",
         config.host, config.port, config.dbname, config.user,
@@ -655,7 +667,7 @@ mod tests {
     // ── Connection string ────────────────────────────────────────────────
 
     #[test]
-    fn test_connection_string_includes_replication_option() {
+    fn test_connection_string_omits_replication_option() {
         let config = SourceConfig {
             host: "pg.example.com".into(),
             port: 5432,
@@ -670,7 +682,10 @@ mod tests {
         assert!(conn_str.contains("dbname=testdb"));
         assert!(conn_str.contains("user=replicator"));
         assert!(conn_str.contains("password=s3cret"));
-        assert!(conn_str.contains("options='--replication=database'"));
+        assert!(
+            !conn_str.contains("--replication"),
+            "replication option omitted per tokio-postgres 0.7 limitation: {conn_str}"
+        );
     }
 
     #[test]
@@ -813,28 +828,6 @@ mod tests {
     // ── Plain connection strings ──────────────────────────────────────────
 
     #[test]
-    fn test_plain_connection_string_omits_replication_option() {
-        let config = SourceConfig {
-            host: "pg.example.com".into(),
-            port: 5432,
-            dbname: "testdb".into(),
-            user: "replicator".into(),
-            password: "s3cret".into(),
-            ..SourceConfig::default()
-        };
-        let conn_str = connection_string_plain(&config);
-        assert!(conn_str.contains("host=pg.example.com"));
-        assert!(conn_str.contains("port=5432"));
-        assert!(conn_str.contains("dbname=testdb"));
-        assert!(conn_str.contains("user=replicator"));
-        assert!(conn_str.contains("password=s3cret"));
-        assert!(
-            !conn_str.contains("--replication"),
-            "plain connection should NOT contain --replication: {conn_str}"
-        );
-    }
-
-    #[test]
     fn test_plain_connection_string_with_tls() {
         let config = SourceConfig {
             host: "pg.example.com".into(),
@@ -845,7 +838,7 @@ mod tests {
             ssl_mode: crate::config::SslMode::Require,
             ..SourceConfig::default()
         };
-        let conn_str = connection_string_plain(&config);
+        let conn_str = connection_string(&config);
         assert!(conn_str.contains("host=pg.example.com"));
         assert!(conn_str.contains("password=s3cret"));
         assert!(!conn_str.contains("--replication"));

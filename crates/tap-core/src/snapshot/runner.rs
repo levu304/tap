@@ -95,32 +95,72 @@ fn parse_qualified_name(qualified: &str) -> TableInfo {
 
 /// Convert a `tokio_postgres::Row` into a `serde_json::Value::Object`.
 ///
-/// For each column, first tries `serde_json::Value` (handles most built-in
-/// types via the `with-serde_json-1` tokio-postgres feature), falling back
-/// to a `String` representation for unsupported column types.
+/// Determines the Postgres column type via its OID and reads it with the
+/// correct Rust type, then serialises to JSON.  Handles common types:
+/// integer, float, bool, text, json/jsonb, and date/time.  Falls back to
+/// a string representation for unknown types.
 fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
     let columns = row.columns();
     let mut map = serde_json::Map::with_capacity(columns.len());
 
     for (i, col) in columns.iter().enumerate() {
         let name = col.name();
+        let type_oid = col.type_().oid();
 
-        // Try serde_json::Value first (int4, int8, text, bool, json/b, etc.)
-        let value = match row.try_get::<_, Option<serde_json::Value>>(i) {
-            Ok(Some(v)) => v,
-            Ok(None) => serde_json::Value::Null,
-            Err(_) => {
-                // Fallback: string representation
-                match row.try_get::<_, Option<String>>(i) {
-                    Ok(Some(s)) => serde_json::Value::String(s),
+        // Helper: read a column as an Option<T> and convert to JSON
+        macro_rules! read_opt {
+            ($t:ty) => {{
+                match row.try_get::<_, Option<$t>>(i) {
+                    Ok(Some(v)) => serde_json::json!(v),
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => {
                         return Err(TapError::Decode(format!(
-                            "failed to read column '{name}' at index {i}: {e}"
+                            "failed to read column '{name}' at {i}: {e}"
+                        )));
+                    }
+                }
+            }};
+        }
+
+        let value: serde_json::Value = match type_oid {
+            // int8 (bigint / int8)
+            20 => read_opt!(i64),
+            // int2 (smallint / int2)
+            21 => read_opt!(i16),
+            // int4 (integer / serial / int4) and oid
+            23 | 26 => read_opt!(i32),
+            // bool
+            16 => read_opt!(bool),
+            // float4 (real)
+            700 => read_opt!(f32),
+            // float8 (double precision)
+            701 => read_opt!(f64),
+            // json / jsonb
+            114 | 3802 => {
+                // with-serde_json-1 feature handles json(b) → Value
+                match row.try_get::<_, Option<serde_json::Value>>(i) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => {
+                        return Err(TapError::Decode(format!(
+                            "failed to read json column '{name}' at {i}: {e}"
                         )));
                     }
                 }
             }
+            // timestamptz / timestamp — read via with-chrono-0_4 feature
+            1184 | 1114 => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i) {
+                Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read timestamp column '{name}' at {i}: {e}"
+                    )));
+                }
+            },
+            // Everything else (text, varchar, char, date, time, uuid,
+            // inet, bytea, etc.) — read as String.
+            _ => read_opt!(String),
         };
         map.insert(name.to_string(), value);
     }
@@ -146,24 +186,69 @@ fn build_snapshot_event_id(
         return Ok(format!("{}:{}", prefix, Uuid::new_v4()));
     }
 
-    let mut parts = Vec::with_capacity(pk_columns.len());
-    for pk in pk_columns {
-        let val = match row.try_get::<_, Option<serde_json::Value>>(pk.as_str()) {
-            Ok(Some(v)) => v.to_string(),
-            Ok(None) => "NULL".to_string(),
-            Err(_) => {
-                // Fallback: try as string
-                match row.try_get::<_, Option<String>>(pk.as_str()) {
-                    Ok(Some(s)) => serde_json::Value::String(s).to_string(),
-                    Ok(None) => "NULL".to_string(),
-                    Err(e) => {
-                        return Err(TapError::Decode(format!(
-                            "failed to read PK column '{pk}' for event ID: {e}"
-                        )));
-                    }
+    // Macro: read PK column by type OID and convert to string
+    macro_rules! pk_str {
+        ($row:expr, $idx:expr, $t:ty) => {{
+            match $row.try_get::<_, Option<$t>>($idx) {
+                Ok(Some(v)) => v.to_string(),
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK column for event ID: {e}"
+                    )));
                 }
             }
+        }};
+    }
+
+    let columns = row.columns();
+    let mut parts = Vec::with_capacity(pk_columns.len());
+
+    for pk in pk_columns {
+        // Find column index by name
+        let idx = columns
+            .iter()
+            .position(|c| c.name() == pk.as_str())
+            .ok_or_else(|| {
+                TapError::Decode(format!("PK column '{pk}' not found in row columns"))
+            })?;
+        let type_oid = columns[idx].type_().oid();
+
+        let val = match type_oid {
+            // int8 (bigint)
+            20 => pk_str!(row, idx, i64),
+            // int2 (smallint)
+            21 => pk_str!(row, idx, i16),
+            // int4 / serial / oid
+            23 | 26 => pk_str!(row, idx, i32),
+            // bool
+            16 => pk_str!(row, idx, bool),
+            // float4
+            700 => pk_str!(row, idx, f32),
+            // float8
+            701 => pk_str!(row, idx, f64),
+            // timestamptz / timestamp
+            1184 | 1114 => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx) {
+                Ok(Some(v)) => v.to_rfc3339(),
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK timestamp column '{pk}' for event ID: {e}"
+                    )));
+                }
+            },
+            // Everything else — read as String
+            _ => match row.try_get::<_, Option<String>>(idx) {
+                Ok(Some(s)) => s,
+                Ok(None) => "NULL".to_string(),
+                Err(e) => {
+                    return Err(TapError::Decode(format!(
+                        "failed to read PK column '{pk}' for event ID: {e}"
+                    )));
+                }
+            },
         };
+
         parts.push(format!("{pk}={val}"));
     }
 
@@ -437,6 +522,12 @@ impl SnapshotRunner {
         // ── Worker transaction (auto-rollback on Drop)  ───────────────
         let txn = self.worker.transaction().await?;
 
+        // SET TRANSACTION SNAPSHOT requires REPEATABLE READ or SERIALIZABLE.
+        // tokio_postgres::transaction() defaults to READ COMMITTED, so we
+        // must upgrade before issuing the snapshot command.
+        txn.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await?;
+
         // Pin this transaction to the exported snapshot
         txn.simple_query(&format!("SET TRANSACTION SNAPSHOT '{snapshot_id}'"))
             .await?;
@@ -618,8 +709,8 @@ impl SnapshotRunner {
                  JOIN pg_attribute a \
                    ON a.attrelid = i.indrelid \
                   AND a.attnum = ANY(i.indkey::int2[]) \
-                 WHERE i.indrelid = $1::regclass \
-                   AND i.indprimary \
+                 WHERE i.indrelid = to_regclass($1) \
+                   AND i.indisprimary \
                  ORDER BY a.attnum",
                 &[&table.qualified],
             )
