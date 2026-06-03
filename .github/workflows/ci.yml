@@ -139,7 +139,13 @@ jobs:
         env:
           TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
           PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
-        run: cargo test --workspace -- --test-threads=1
+        # Run per-crate to avoid cargo's parallel test-binary execution
+        # which hangs when mixing lib + integration test binaries.
+        run: |
+          cargo test -p tap-core --lib -- --test-threads=1
+          cargo test -p tap-cli -- --test-threads=1
+          cargo test -p tap-sdk -- --test-threads=1
+          cargo test -p tap-core --test integration -- --test-threads=1
 
   # ---------------------------------------------------------------------------
   # Stage 4b: Unit tests (no Postgres needed, matrix: os)
