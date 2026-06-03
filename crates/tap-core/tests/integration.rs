@@ -200,7 +200,7 @@ fn test_name(prefix: &str) -> String {
 async fn read_decoded_changes(pg: &TestPg, slot_name: &str) -> Vec<String> {
     pg.query(&format!(
         "SELECT data FROM pg_logical_slot_get_changes(
-             '{slot_name}', NULL,
+             '{slot_name}', NULL, NULL,
              'include-xids', '0',
              'skip-empty-xacts', '1'
          )"

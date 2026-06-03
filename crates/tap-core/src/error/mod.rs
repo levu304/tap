@@ -37,8 +37,9 @@ pub enum TapError {
     /// Postgres connection error with credentials redacted from the message.
     ///
     /// Used at connect sites where the `tokio_postgres::Error` display may
-    /// include the connection string with password.
-    #[error("Postgres connection error (details redacted)")]
+    /// include the connection string with password.  The inner string
+    /// already has the password replaced with `<REDACTED>`.
+    #[error("Postgres connection error: {0}")]
     PostgresConnectionRedacted(String),
 
     /// Error from the SQLite state-store backend.

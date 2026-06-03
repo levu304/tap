@@ -101,11 +101,14 @@ impl<'de> Deserialize<'de> for Lsn {
 /// Build a connection string from [`SourceConfig`] suitable for
 /// `tokio-postgres`.
 ///
-/// Includes the `options=--replication=database` parameter required for
-/// logical replication connections.
+/// Includes `options=--replication=database` to request walsender mode
+/// (logical replication backend).  The value is **not** quoted with single
+/// quotes because `tokio-postgres` passes the `options` value verbatim to
+/// the PostgreSQL server's startup packet — libpq quoting syntax does not
+/// apply.
 fn connection_string(config: &SourceConfig) -> String {
     format!(
-        "host={} port={} dbname={} user={} password={} options='--replication=database'",
+        "host={} port={} dbname={} user={} password={} options=--replication=database",
         config.host, config.port, config.dbname, config.user, config.password,
     )
 }
@@ -125,7 +128,7 @@ fn connection_string_plain(config: &SourceConfig) -> String {
 /// The password value is replaced with `<REDACTED>`.
 fn redacted_connection_string(config: &SourceConfig) -> String {
     format!(
-        "host={} port={} dbname={} user={} password=<REDACTED> options='--replication=database'",
+        "host={} port={} dbname={} user={} password=<REDACTED> options=--replication=database",
         config.host, config.port, config.dbname, config.user,
     )
 }
@@ -670,7 +673,7 @@ mod tests {
         assert!(conn_str.contains("dbname=testdb"));
         assert!(conn_str.contains("user=replicator"));
         assert!(conn_str.contains("password=s3cret"));
-        assert!(conn_str.contains("options='--replication=database'"));
+        assert!(conn_str.contains("options=--replication=database"));
     }
 
     #[test]
