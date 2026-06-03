@@ -16,10 +16,17 @@
 //! can run concurrently (or sequentially against a shared container).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use testcontainers::{Container, GenericImage, clients::Cli, core::WaitFor};
+
+// Re-use the library's engine types so we can exercise them against a real
+// Postgres (or the TAP_TEST_DB CI database).
+use tap_core::config::{SnapshotConfig, SourceConfig, StateConfig};
+use tap_core::postgres::{self, Lsn, PgConnection};
+use tap_core::snapshot::SnapshotRunner;
+use tap_core::state::StateStore;
 
 /// Postgres image to use for all integration tests.
 const PG_IMAGE: &str = "postgres";
@@ -677,4 +684,324 @@ async fn test_graceful_shutdown() {
     assert_eq!(all_rows[2], "phase3");
 
     drop_decoding_slot(pg, &slot_b).await;
+}
+
+// ===========================================================================
+// Engine-level integration tests
+// ===========================================================================
+//
+// Unlike the tests above (which use the built-in test_decoding plugin to
+// inspect WAL at the SQL level), these tests exercise Tap's actual engine
+// components: SnapshotRunner, StateStore, and PgConnection.
+
+// ---------------------------------------------------------------------------
+// StateStore persistence (no Postgres required)
+// ---------------------------------------------------------------------------
+
+/// Test that StateStore persists offsets and reads them back correctly,
+/// simulating the checkpoint/resume cycle in the capture engine.
+#[tokio::test]
+async fn test_state_store_offset_persistence() {
+    let dir = std::env::temp_dir().join(format!("tap_state_{}", test_name("")));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.db");
+    let config = StateConfig {
+        path: db_path.to_string_lossy().to_string(),
+        max_backup_size_kb: 1024,
+    };
+
+    {
+        let store = StateStore::open(&config).expect("open state store");
+
+        // Write a checkpoint (simulating a streamed transaction)
+        let lsn: Lsn = "0/16B37428".parse().expect("valid LSN");
+        store
+            .write_offset(&lsn, "12345", 1717000000000, false)
+            .expect("write offset");
+
+        // Read it back
+        let offset = store
+            .read_last_offset()
+            .expect("read offset")
+            .expect("offset should exist");
+        assert_eq!(offset.committed_lsn, "0/16B37428");
+        assert!(!offset.is_final, "non-final offset");
+
+        // Write a final (flush) checkpoint
+        let lsn2: Lsn = "0/16B37429".parse().expect("valid LSN");
+        store
+            .write_offset(&lsn2, "12346", 1717000001000, true)
+            .expect("write final offset");
+
+        // Read back — should prefer the final offset
+        let final_offset = store
+            .read_last_offset()
+            .expect("read offset")
+            .expect("offset should exist");
+        assert_eq!(final_offset.committed_lsn, "0/16B37429");
+        assert!(final_offset.is_final, "should be final offset");
+    }
+
+    // Re-open (simulating process restart) — data should persist
+    {
+        let store = StateStore::open(&config).expect("re-open state store");
+        let offset = store
+            .read_last_offset()
+            .expect("read offset")
+            .expect("offset should persist across restarts");
+        assert_eq!(
+            offset.committed_lsn, "0/16B37429",
+            "persisted LSN should survive restart"
+        );
+        assert!(offset.is_final, "persisted offset should be final");
+    }
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Test that SnapshotRecord progress is tracked correctly.
+#[tokio::test]
+async fn test_state_store_snapshot_progress() {
+    let dir = std::env::temp_dir().join(format!("tap_state_snap_{}", test_name("")));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.db");
+    let config = StateConfig {
+        path: db_path.to_string_lossy().to_string(),
+        max_backup_size_kb: 1024,
+    };
+
+    {
+        let store = StateStore::open(&config).expect("open state store");
+        let lsn: Lsn = "0/16B37428".parse().expect("valid LSN");
+
+        // Write snapshot progress for two tables
+        store
+            .write_snapshot_progress("public.users", "snap-abc-123", 0, &lsn)
+            .expect("write progress");
+        store
+            .write_snapshot_progress("public.orders", "snap-abc-123", 50, &lsn)
+            .expect("write progress");
+
+        // Verify status
+        let users_status = store
+            .get_snapshot_status("public.users")
+            .expect("get status")
+            .expect("should exist");
+        assert_eq!(users_status.status, "in_progress");
+        assert_eq!(users_status.rows_count, 0);
+
+        // Complete one table
+        store
+            .complete_snapshot("public.users", "snap-abc-123", 100)
+            .expect("complete snapshot");
+
+        let completed = store
+            .get_snapshot_status("public.users")
+            .expect("get status")
+            .expect("should exist");
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.rows_count, 100);
+    }
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// SnapshotRunner integration (requires Postgres)
+// ---------------------------------------------------------------------------
+
+/// Test that SnapshotRunner correctly snapshots pre-existing rows from a
+/// real Postgres table and emits Read events with the expected structure.
+#[tokio::test]
+async fn test_snapshot_runner_captures_existing_rows() {
+    let pg = get_test_pg();
+    let table = test_name("t_snap_eng");
+    let slot = test_name("slot_snap_eng");
+
+    pg.create_test_table(&table).await;
+
+    // Pre-populate 5 rows
+    pg.insert_rows(
+        &table,
+        &[
+            ("alpha", 100),
+            ("bravo", 200),
+            ("charlie", 300),
+            ("delta", 400),
+            ("echo", 500),
+        ],
+    )
+    .await;
+
+    // Build a SourceConfig from the test PG connection string
+    let conn_str = pg.connection_string();
+    // Parse host, port, dbname, user, password from connection string
+    let source_cfg = source_config_from_conn_str(conn_str, &slot, &table);
+
+    // Create plain connections for snapshot runner
+    let (keeper, keeper_handle) = postgres::connect_plain(&source_cfg)
+        .await
+        .expect("keeper connect");
+    let (worker, worker_handle) = postgres::connect_plain(&source_cfg)
+        .await
+        .expect("worker connect");
+
+    // Open a temp state store for snapshot progress
+    let dir = std::env::temp_dir().join(format!("tap_snap_{}", test_name("")));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.db");
+    let state_config = StateConfig {
+        path: db_path.to_string_lossy().to_string(),
+        max_backup_size_kb: 1024,
+    };
+    let state = Arc::new(tokio::sync::Mutex::new(
+        StateStore::open(&state_config).expect("open state store"),
+    ));
+
+    let snap_config = SnapshotConfig::default();
+    let db_name = psql_db_name(conn_str);
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tap_core::event::ChangeEvent>();
+
+    let mut runner = SnapshotRunner::new(keeper, worker, state, snap_config, db_name, event_tx);
+
+    let result = runner.run().await.expect("snapshot runner should succeed");
+
+    // Verify snapshot result
+    assert_eq!(result.total_rows, 5, "should have snapshotted 5 rows");
+    assert!(
+        !result.tables_snapshotted.is_empty(),
+        "should have at least one table"
+    );
+    assert!(!result.snapshot_id.is_empty(), "should have a snapshot ID");
+
+    // Collect events
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+
+    assert_eq!(events.len(), 5, "should have 5 Read events");
+
+    // Verify each event is a Read operation with snapshot=true
+    for event in &events {
+        assert_eq!(
+            event.op,
+            tap_core::event::Operation::Read,
+            "snapshot events should be Read operations"
+        );
+        assert!(
+            event.source.snapshot == Some(true),
+            "snapshot events should have snapshot=true"
+        );
+    }
+
+    // Verify field order matches insertion order (by primary key)
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| {
+            e.after
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(names, vec!["alpha", "bravo", "charlie", "delta", "echo"]);
+
+    // Await background tasks
+    let _ = keeper_handle.await;
+    let _ = worker_handle.await;
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// PgConnection real API (requires Postgres)
+// ---------------------------------------------------------------------------
+
+/// Test that a real PgConnection can connect, create a slot and publication,
+/// validate tables, and cleanly shut down.
+#[tokio::test]
+async fn test_pg_connection_api_lifecycle() {
+    let pg = get_test_pg();
+    let table = test_name("t_pg_api");
+    let slot_name = test_name("slot_pg_api");
+    let pub_name = test_name("pub_pg_api");
+
+    pg.create_test_table(&table).await;
+    // Insert a row so the table has data
+    pg.insert_rows(&table, &[("api_test", 1)]).await;
+
+    let conn_str = pg.connection_string();
+    let mut source_cfg = source_config_from_conn_str(conn_str, &slot_name, &table);
+    source_cfg.publication = pub_name;
+    source_cfg.slot_name = slot_name;
+
+    // Connect (replication mode)
+    let pg_conn = PgConnection::connect(&source_cfg)
+        .await
+        .expect("PgConnection::connect should succeed");
+
+    // Ensure replication slot — creates a new slot (fresh name), returns ZERO
+    let _lsn = pg_conn
+        .ensure_replication_slot()
+        .await
+        .expect("ensure_replication_slot should succeed");
+
+    // Ensure publication
+    pg_conn
+        .ensure_publication()
+        .await
+        .expect("ensure_publication should succeed");
+
+    // Validate tables
+    pg_conn
+        .validate_tables()
+        .await
+        .expect("validate_tables should succeed for existing table");
+
+    // Clean shutdown
+    pg_conn.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for engine-level tests
+// ---------------------------------------------------------------------------
+
+/// Build a [`SourceConfig`] from a Postgres connection string.
+/// The connection string is expected to have the form:
+/// `postgres://user:password@host:port/dbname`
+fn source_config_from_conn_str(conn_str: &str, slot: &str, table: &str) -> SourceConfig {
+    // Strip the `postgres://` prefix
+    let rest = conn_str.strip_prefix("postgres://").unwrap_or(conn_str);
+    let (user_info, rest) = rest.split_once('@').unwrap_or(("", rest));
+    let (user, password) = user_info.split_once(':').unwrap_or((user_info, ""));
+    let (host_port, dbname) = rest.split_once('/').unwrap_or((rest, "tap_test"));
+    let (host, port) = host_port.split_once(':').unwrap_or((host_port, "5432"));
+
+    SourceConfig {
+        host: host.to_string(),
+        port: port.parse().unwrap_or(5432),
+        dbname: dbname.to_string(),
+        user: user.to_string(),
+        password: password.to_string(),
+        slot_name: slot.to_string(),
+        publication: format!("pub_{slot}"),
+        tables: vec![format!("public.{table}")],
+        plugin: "pgoutput".to_string(),
+        ssl_mode: tap_core::config::SslMode::Disable,
+    }
+}
+
+/// Extract the database name from a connection string.
+fn psql_db_name(conn_str: &str) -> String {
+    let rest = conn_str.strip_prefix("postgres://").unwrap_or(conn_str);
+    let (_user_info, rest) = rest.split_once('@').unwrap_or(("", rest));
+    let (_host_port, dbname) = rest.split_once('/').unwrap_or((rest, "tap_test"));
+    // Strip any query parameters
+    dbname.split('?').next().unwrap_or(dbname).to_string()
 }
