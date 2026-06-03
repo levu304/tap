@@ -332,7 +332,14 @@ impl PgConnection {
         } else {
             let table_list = tables
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| {
+                    // Split schema-qualified names (e.g. "public.table")
+                    // so each part is quoted separately: "public"."table"
+                    t.split('.')
+                        .map(|part| format!("\"{part}\""))
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!("CREATE PUBLICATION \"{pub_name}\" FOR TABLE {table_list}");

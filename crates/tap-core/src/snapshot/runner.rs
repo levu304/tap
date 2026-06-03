@@ -437,6 +437,12 @@ impl SnapshotRunner {
         // ── Worker transaction (auto-rollback on Drop)  ───────────────
         let txn = self.worker.transaction().await?;
 
+        // SET TRANSACTION SNAPSHOT requires REPEATABLE READ or SERIALIZABLE.
+        // tokio_postgres::transaction() defaults to READ COMMITTED, so we
+        // must upgrade before issuing the snapshot command.
+        txn.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await?;
+
         // Pin this transaction to the exported snapshot
         txn.simple_query(&format!("SET TRANSACTION SNAPSHOT '{snapshot_id}'"))
             .await?;
