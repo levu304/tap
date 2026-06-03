@@ -208,11 +208,16 @@ fn test_name(prefix: &str) -> String {
 /// Used to prevent slot leaks when tests panic after creating a slot.
 /// Connects directly via the stored connection string and issues
 /// `pg_drop_replication_slot` on Drop.
+///
+/// Currently unused (tests do explicit cleanup) but retained for future
+/// tests that might panic before reaching cleanup code.
+#[allow(dead_code)]
 struct SlotGuard {
     pg_conn_str: String,
     slot_name: String,
 }
 
+#[allow(dead_code)]
 impl SlotGuard {
     fn new(pg: &TestPg, slot_name: &str) -> Self {
         Self {
