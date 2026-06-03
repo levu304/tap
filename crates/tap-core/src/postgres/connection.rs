@@ -269,12 +269,23 @@ impl PgConnection {
             return Ok(lsn);
         }
 
-        // Create the slot using pgoutput plugin
-        let create_sql = format!("CREATE_REPLICATION_SLOT \"{slot_name}\" LOGICAL pgoutput");
+        // Create the slot using pgoutput plugin.
+        // Uses the SQL function pg_create_logical_replication_slot() instead of
+        // the replication-protocol CREATE_REPLICATION_SLOT command because
+        // tokio-postgres 0.7 does not support the `replication=database`
+        // connection parameter needed for protocol-level commands.
         info!("creating replication slot '{slot_name}'");
-        self.client.simple_query(&create_sql).await?;
-        info!("created replication slot '{slot_name}'");
-        Ok(Lsn::ZERO)
+        let row = self
+            .client
+            .query_one(
+                "SELECT lsn::text FROM pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[slot_name],
+            )
+            .await?;
+        let lsn_str: String = row.get(0);
+        let lsn = Lsn::from_str(&lsn_str)?;
+        info!("created replication slot '{slot_name}' at LSN {lsn}");
+        Ok(lsn)
     }
 
     /// Ensure the publication exists.

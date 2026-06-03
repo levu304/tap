@@ -860,7 +860,11 @@ async fn test_snapshot_runner_captures_existing_rows() {
         StateStore::open(&state_config).expect("open state store"),
     ));
 
-    let snap_config = SnapshotConfig::default();
+    let tables = vec![format!("public.{table}")];
+    let snap_config = SnapshotConfig {
+        tables,
+        ..Default::default()
+    };
     let db_name = psql_db_name(conn_str);
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<tap_core::event::ChangeEvent>();

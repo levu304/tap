@@ -84,6 +84,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         pg.validate_tables().await?;
     }
 
+    // Ensure replication slot and publication exist (idempotent)
+    pg.ensure_replication_slot().await?;
+    pg.ensure_publication().await?;
+
     // ── 3. Open state store ──────────────────────────────────────────
     let state = Arc::new(Mutex::new(StateStore::open(&config.state)?));
 
