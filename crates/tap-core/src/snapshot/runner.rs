@@ -624,7 +624,7 @@ impl SnapshotRunner {
                  JOIN pg_attribute a \
                    ON a.attrelid = i.indrelid \
                   AND a.attnum = ANY(i.indkey::int2[]) \
-                 WHERE i.indrelid = $1::regclass \
+                 WHERE i.indrelid = to_regclass($1) \
                    AND i.indisprimary \
                  ORDER BY a.attnum",
                 &[&table.qualified],
