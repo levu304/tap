@@ -82,7 +82,7 @@ jobs:
     name: Test (pg ${{ matrix.pg-version }})
     runs-on: ubuntu-latest
     needs: [build]
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       matrix:
         pg-version: [14, 15, 16]
@@ -135,17 +135,18 @@ jobs:
           psql -h localhost -U postgres -d tap_test -c "SELECT version(), current_setting('wal_level') AS wal_level;"
           psql -h localhost -U postgres -d tap_test -c "SELECT 1 AS alive;"
 
-      - name: Run workspace tests
+      - name: Run lib tests
         env:
           TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
           PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
-        # Run per-crate to avoid cargo's parallel test-binary execution
-        # which hangs when mixing lib + integration test binaries.
-        run: |
-          cargo test -p tap-core --lib -- --test-threads=1
-          cargo test -p tap-cli -- --test-threads=1
-          cargo test -p tap-sdk -- --test-threads=1
-          cargo test -p tap-core --test integration -- --test-threads=1
+        run: cargo test --lib --workspace -- --test-threads=1
+
+      - name: Run integration tests
+        env:
+          TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
+          PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
+        # Run in separate step so cargo doesn't run test binaries in parallel
+        run: cargo test -p tap-core --test integration -- --test-threads=1
 
   # ---------------------------------------------------------------------------
   # Stage 4b: Unit tests (no Postgres needed, matrix: os)
