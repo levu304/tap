@@ -34,7 +34,6 @@
     "vitest": "^3.0.0"
   },
   "optionalDependencies": {
-    "tap-cdc-win32-x64-msvc": "0.1.0",
     "tap-cdc-darwin-x64": "0.1.0",
     "tap-cdc-linux-x64-gnu": "0.1.0",
     "tap-cdc-darwin-arm64": "0.1.0",
