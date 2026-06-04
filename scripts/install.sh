@@ -71,7 +71,10 @@ case "$ARCH" in
     ;;
 esac
 
-ASSET_NAME="tap-${TARGET_ARCH}-${TARGET_OS}"
+case "$OS" in
+  darwin) ASSET_NAME="tap-darwin-${TARGET_ARCH}" ;;
+  linux)  ASSET_NAME="tap-linux-${TARGET_ARCH}-gnu" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Determine download tool
