@@ -231,6 +231,14 @@ jobs:
 
   # ===========================================================================
   # npm-publish — publish tap-cdc + platform bindings to npm
+  #
+  # Authenticates via npm Trusted Publishing (OIDC): no NPM_TOKEN secret.
+  # The `id-token: write` permission above mints a short-lived JWT, and
+  # `actions/setup-node` with `registry-url` configures npm to exchange
+  # it for a registry session — so `npm publish` runs unauthenticated
+  # in this workflow's env. The trusted publisher must be configured on
+  # the tap-cdc package's npm settings (Provider: GitHub Actions,
+  # Workflow: release.yml, Repo: levu304/tap).
   # ===========================================================================
   npm-publish:
     name: Publish to npm
@@ -278,14 +286,10 @@ jobs:
             fi
           done
         working-directory: packages/sdk-ts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main tap-cdc package
         run: npm publish --access public
         working-directory: packages/sdk-ts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ===========================================================================
   # smoke-test — verify both distribution paths work after publish
