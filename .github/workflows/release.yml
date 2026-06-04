@@ -1,0 +1,230 @@
+# Tap release pipeline
+# Triggered by tags matching v* (e.g., v0.1.0).
+#
+# The matrix builds CLI binaries for 5 targets (3 runner types) and the
+# napi-rs SDK binding for the runner's native platform.  Uploads all
+# artifacts to a GitHub Release.
+#
+# Jobs:
+#   release  — matrix: build CLI + SDK per (target, os)  (needs: nothing)
+#   create-release — collect artifacts from all matrix jobs and publish
+#
+# Limitations (v0.1.0):
+#   • napi-rs SDK is built only for the runner's native platform;
+#     not every CLI target has a corresponding platform SDK build.
+#   • macOS code signing is ad-hoc only; notarization is deferred.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# =============================================================================
+# Build matrix — one job per target-triple
+# =============================================================================
+jobs:
+  release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # -- Apple Silicon ---------------------------------------------------
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary-name: tap-darwin-arm64
+            # napi-rs builds natively for the host arch
+            sdk-platform: darwin-arm64
+
+          # -- Apple Intel (cross-compiled from ARM runner) --------------------
+          - os: macos-14
+            target: x86_64-apple-darwin
+            binary-name: tap-darwin-x64
+            # no native napi build for x86_64 on an ARM runner
+            sdk-platform: ""
+
+          # -- Linux x86_64 (glibc) -------------------------------------------
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary-name: tap-linux-x64-gnu
+            sdk-platform: linux-x64-gnu
+
+          # -- Linux ARM64 (glibc, cross-compiled) -----------------------------
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            binary-name: tap-linux-arm64-gnu
+            # cross-compiled platform — no native napi build
+            sdk-platform: ""
+
+          # -- Linux x86_64 (musl, fully static) -------------------------------
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            binary-name: tap-linux-x64-musl
+            # cross-compiled platform — no native napi build
+            sdk-platform: ""
+
+      fail-fast: false
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout & toolchain
+      # -----------------------------------------------------------------------
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@b8d20240f9820b23a11b60a5890b2060e16b63b1 # v1.11
+        with:
+          toolchain: "1.85.0"
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@f0e9c18a85579b31507ec6c79db0e2b4318d9775 # v2.7.8
+
+      # -----------------------------------------------------------------------
+      # Build CLI binary
+      # -----------------------------------------------------------------------
+      - name: Install cross-compilation toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+      # -----------------------------------------------------------------------
+      - name: Build CLI binary
+        run: |
+          cargo build --release -p tap-cli --target ${{ matrix.target }}
+
+      - name: Package CLI binary
+        run: |
+          mkdir -p dist
+          # Copy binary and rename from "tap-cli" to "tap" so the dist
+          # artifact name matches the user-facing command.
+          cp "target/${{ matrix.target }}/release/tap-cli" "dist/${{ matrix.binary-name }}"
+          # Create tarball
+          tar -czf "dist/${{ matrix.binary-name }}.tar.gz" \
+            -C dist "${{ matrix.binary-name }}"
+
+      # -----------------------------------------------------------------------
+      # macOS ad-hoc code signing (notarization deferred to v0.2+)
+      # -----------------------------------------------------------------------
+      - name: Sign binary (macOS ad-hoc)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force -s - "dist/${{ matrix.binary-name }}" \
+            && echo "  ✓ signed ${{ matrix.binary-name }} (ad-hoc)"
+
+      # -----------------------------------------------------------------------
+      # napi-rs SDK (native host platform only)
+      # -----------------------------------------------------------------------
+      - name: Setup pnpm
+        if: ${{ matrix.sdk-platform != '' }}
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66dd77 # v4.1.0
+        with:
+          version: 9
+
+      - name: Setup Node
+        if: ${{ matrix.sdk-platform != '' }}
+        uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: packages/sdk-ts/pnpm-lock.yaml
+
+      - name: Install SDK dependencies
+        if: ${{ matrix.sdk-platform != '' }}
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/sdk-ts
+
+      - name: Build napi-rs binding
+        if: ${{ matrix.sdk-platform != '' }}
+        run: npx @napi-rs/cli build --platform --release
+        working-directory: packages/sdk-ts
+
+      - name: Run napi artifacts
+        if: ${{ matrix.sdk-platform != '' }}
+        run: npx @napi-rs/cli artifacts
+        working-directory: packages/sdk-ts
+
+      - name: Package SDK platform artifacts
+        if: ${{ matrix.sdk-platform != '' }}
+        run: |
+          mkdir -p dist
+          tar -czf "dist/sdk-${{ matrix.sdk-platform }}.tar.gz" \
+            -C npm "${{ matrix.sdk-platform }}"
+        working-directory: packages/sdk-ts
+
+      # -----------------------------------------------------------------------
+      # Upload individual artifacts for the release collector job
+      # -----------------------------------------------------------------------
+      - name: Upload CLI binary artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ${{ matrix.binary-name }}
+          path: dist/${{ matrix.binary-name }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload SDK platform artifact
+        if: ${{ matrix.sdk-platform != '' }}
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: sdk-${{ matrix.sdk-platform }}
+          path: packages/sdk-ts/dist/sdk-${{ matrix.sdk-platform }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload standalone binary (un-tarred, for direct download)
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ${{ matrix.binary-name }}-bin
+          path: dist/${{ matrix.binary-name }}
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Collector job — create the GitHub Release with all assets
+  # ===========================================================================
+  create-release:
+    name: Create GitHub Release
+    needs: [release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: release-assets
+          merge-multiple: false
+
+      - name: Organise release assets
+        run: |
+          mkdir -p assets
+
+          # Flatten: move every tar.gz and binary into a single assets/ dir
+          find release-assets -type f \( -name '*.tar.gz' -o -name 'tap-*' \) \
+            -exec cp {} assets/ \;
+
+          # Generate checksums
+          cd assets
+          if command -v sha256sum &>/dev/null; then
+            sha256sum * > SHA256SUMS
+          else
+            shasum -a 256 * > SHA256SUMS
+          fi
+          echo "Assets:"
+          ls -lh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@c95fe60593908ddce57926873f00bcc2c76e1e1a # v2.1.0
+        with:
+          # The tag is already set from the push trigger.
+          # Draft: true so a human can review before publishing.
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            assets/*
