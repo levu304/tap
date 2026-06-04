@@ -18,7 +18,7 @@ Get change events from a Postgres database in under five minutes.
 
 ```bash
 # Install the CLI
-curl -fsSL https://tap.dev/install.sh | sh
+curl -fsSL https://tap-dev.github.io/tap/install.sh | sh
 
 # Or install the TypeScript SDK
 npm install @tap/sdk
@@ -100,7 +100,7 @@ The engine connects to Postgres via logical replication (`pgoutput` by default, 
 ### CLI Binary
 
 ```bash
-curl -fsSL https://tap.dev/install.sh | sh
+curl -fsSL https://tap-dev.github.io/tap/install.sh | sh
 ```
 
 Prebuilt binaries are available for:

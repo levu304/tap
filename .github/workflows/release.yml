@@ -228,3 +228,82 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             assets/*
+
+  # ===========================================================================
+  # npm-publish — publish @tap/sdk + platform bindings to npm
+  # ===========================================================================
+  npm-publish:
+    name: Publish to npm
+    needs: [create-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66dd77 # v4.1.0
+        with:
+          version: 9
+
+      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.3.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/sdk-ts
+
+      - name: Download SDK platform artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: /tmp/sdk-artifacts
+          merge-multiple: false
+
+      - name: Extract platform artifacts into npm/
+        run: |
+          find /tmp/sdk-artifacts -name 'sdk-*.tar.gz' \
+            -exec tar -xzf {} -C npm/ \;
+          echo "=== Platform packages ready ==="
+          ls -la npm/*/package.json 2>/dev/null || echo "(no platform packages found)"
+        working-directory: packages/sdk-ts
+
+      - name: Publish platform packages
+        run: |
+          for dir in npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "Publishing ${dir}..."
+              npm publish "${dir}" --access public
+            fi
+          done
+        working-directory: packages/sdk-ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main @tap/sdk package
+        run: npm publish --access public
+        working-directory: packages/sdk-ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ===========================================================================
+  # smoke-test — verify both distribution paths work after publish
+  # ===========================================================================
+  smoke-test:
+    name: Smoke test distribution paths
+    needs: [npm-publish]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Test install.sh URL
+        run: |
+          HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+            "https://tap-dev.github.io/tap/install.sh")
+          echo "install.sh → HTTP ${HTTP_CODE}"
+          [ "$HTTP_CODE" = "200" ] || { echo "FAILED"; exit 1; }
+
+      - name: Test npm package
+        run: |
+          PUBLISHED_VER=$(npm view @tap/sdk version 2>/dev/null)
+          echo "@tap/sdk → v${PUBLISHED_VER}"
+          [ -n "$PUBLISHED_VER" ] || { echo "FAILED — package not found"; exit 1; }
