@@ -239,6 +239,12 @@ jobs:
   # in this workflow's env. The trusted publisher must be configured on
   # the tap-cdc package's npm settings (Provider: GitHub Actions,
   # Workflow: release.yml, Repo: levu304/tap).
+  #
+  # Idempotent: every publish step checks `npm view <pkg> version` and
+  # skips the publish if the target version is already on the registry.
+  # This makes the pipeline safe to re-run after a partial failure
+  # (e.g. platforms published but the main republish failed with
+  # EPUBLISHCONFLICT) and lets the downstream smoke-test job always run.
   # ===========================================================================
   npm-publish:
     name: Publish to npm
@@ -279,16 +285,31 @@ jobs:
 
       - name: Publish platform packages
         run: |
+          set -e
           for dir in npm/*/; do
-            if [ -f "${dir}package.json" ]; then
-              echo "Publishing ${dir}..."
+            [ -f "${dir}package.json" ] || continue
+            pkg=$(node -p "require('./${dir}package.json').name")
+            ver=$(node -p "require('./${dir}package.json').version")
+            on_npm=$(npm view "$pkg" version 2>/dev/null || echo "")
+            if [ "$on_npm" = "$ver" ]; then
+              echo "⏭  ${pkg}@${ver} already on npm, skipping"
+            else
+              echo "📤 Publishing ${pkg}@${ver}..."
               npm publish "${dir}" --access public
             fi
           done
         working-directory: packages/sdk-ts
 
       - name: Publish main tap-cdc package
-        run: npm publish --access public
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          on_npm=$(npm view tap-cdc version 2>/dev/null || echo "")
+          if [ "$on_npm" = "$ver" ]; then
+            echo "⏭  tap-cdc@${ver} already on npm, skipping"
+          else
+            echo "📤 Publishing tap-cdc@${ver}..."
+            npm publish --access public
+          fi
         working-directory: packages/sdk-ts
 
   # ===========================================================================
