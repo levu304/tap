@@ -43,7 +43,7 @@ Each minor version (0.1.0 → 0.2.0) represents a **milestone** with a clear the
 - [ ] Basic `Tap` class with `on('change')` callback API
 - [ ] Auto-generated TypeScript types from live Postgres schema
 - [ ] HTTP/2 SSE sink output
-- [ ] Prebuilt binaries for macOS (ARM64/x86) and Linux (x86)
+- [ ] Prebuilt binaries for macOS (ARM64, x86_64), Linux (x86_64 glibc, ARM64 glibc, x86_64 musl)
 
 #### Infrastructure
 - [ ] moon monorepo setup with Rust + Node toolchains
@@ -64,6 +64,16 @@ Each minor version (0.1.0 → 0.2.0) represents a **milestone** with a clear the
 - A developer can run `tap init && tap capture` against a local Postgres and receive change events over SSE within 5 minutes.
 - Capture latency < 100ms for single-row inserts.
 - No data loss on graceful shutdown.
+
+### Known Limitations (v0.1.0)
+
+The release CI matrix (`.github/workflows/release.yml`) only builds the napi-rs SDK on the runner's native platform, not for every CLI target. After tagging `v0.1.0`:
+
+- ✅ Prebuilt SDK binaries ship for: **macOS ARM64** (`tap-cdc-darwin-arm64`), **Linux x86_64 glibc** (`tap-cdc-linux-x64-gnu`)
+- ❌ Prebuilt SDK binaries are MISSING for: macOS x86_64 (Intel), Linux ARM64 (glibc), Linux x86_64 (musl/Alpine), Windows x86_64
+- CLI binaries for all 5 CLI target platforms are unaffected (always built from matrix)
+
+`npm install tap-cdc` on an unsupported platform will succeed (`optionalDependencies` only print warnings) but `require('tap-cdc')` will fail at runtime with `MODULE_NOT_FOUND`. Full 5-platform SDK coverage is a v0.1.1 or v0.2.0 follow-up.
 
 ---
 
