@@ -77,12 +77,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@b8d20240f9820b23a11b60a5890b2060e16b63b1 # v1.11
+        uses: actions-rust-lang/setup-rust-toolchain@9399c7bb15d4c7d47b27263d024f0a4978346ba4 # v1.11
         with:
           toolchain: "1.85.0"
           target: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@f0e9c18a85579b31507ec6c79db0e2b4318d9775 # v2.7.8
+      -         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
 
       # -----------------------------------------------------------------------
       # Build CLI binary
@@ -121,7 +121,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Setup pnpm
         if: ${{ matrix.sdk-platform != '' }}
-        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66dd77 # v4.1.0
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 9
 
@@ -218,7 +218,7 @@ jobs:
           ls -lh
 
       - name: Create Release
-        uses: softprops/action-gh-release@c95fe60593908ddce57926873f00bcc2c76e1e1a # v2.1.0
+        uses: softprops/action-gh-release@01570a1f39cb168c169c802c3bceb9e93fb10974 # v2.1.0
         with:
           # The tag is already set from the push trigger.
           # Draft: true so a human can review before publishing.
@@ -256,7 +256,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66dd77 # v4.1.0
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 9
 
