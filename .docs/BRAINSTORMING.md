@@ -60,7 +60,7 @@ Build a next-generation Change Data Capture (CDC) platform that inherits Debeziu
 │  (Library)       │  (Container)     │  (Distributed)      │
 ├─────────────────────────────────────────────────────────────┤
 │  import { tap }  │  docker run tap  │  tap cluster join   │
-│  from '@tap/sdk' │    --sidecar     │    --discovery=...  │
+│  from 'tap-cdc' │    --sidecar     │    --discovery=...  │
 │                  │                  │                     │
 │  const t = new   │  Localhost:9911  │  HA coordinator     │
 │    Tap({...})    │  HTTP API +      │  Shard per DB       │
