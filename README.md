@@ -17,11 +17,8 @@ Tap tracks row-level changes in PostgreSQL via logical replication slots, serial
 Get change events from a Postgres database in under five minutes.
 
 ```bash
-# Install the CLI
+# Option A: Install the CLI binary
 curl -fsSL https://levu304.github.io/tap/install.sh | sh
-
-# Or install the TypeScript SDK
-npm install tap-cdc
 
 # Scaffold a project
 tap init --db mydb --user postgres --password secret
@@ -31,6 +28,24 @@ tap capture
 
 # In another terminal, consume the event stream
 curl -N http://127.0.0.1:8080/events
+```
+
+```typescript
+// Option B: Install the TypeScript SDK (library — no CLI)
+npm install tap-cdc
+
+import { Tap } from "tap-cdc";
+
+const tap = new Tap({
+  connection: "postgresql://user:pass@localhost/mydb",
+  tables: ["public.users", "public.orders"],
+});
+
+tap.onChange((event) => {
+  console.log(`[${event.op}] ${event.source.table}`, event.after);
+});
+
+await tap.start();
 ```
 
 ---
@@ -145,7 +160,7 @@ The SDK ships as a native Node.js addon compiled via `napi-rs`. The correct plat
 | `--log-level <LEVEL>` | `info` | Log level filter (`trace`, `debug`, `info`, `warn`, `error`); also reads `TAP_LOG` env var |
 | `--log-format <FORMAT>` | `text` | Log format (`text` or `json`) |
 
-Use `tap <command> --help` for full option details.
+Use `tap <command> --help` for full option details (CLI binary only).
 
 ---
 

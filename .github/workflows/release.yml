@@ -153,6 +153,11 @@ jobs:
         run: npx @napi-rs/cli artifacts
         working-directory: packages/sdk-ts
 
+      - name: Prepublish artifacts to npm directory
+        if: ${{ matrix.sdk-platform != '' }}
+        run: npx @napi-rs/cli prepublish -t npm
+        working-directory: packages/sdk-ts
+
       - name: Package SDK platform artifacts
         if: ${{ matrix.sdk-platform != '' }}
         run: |
