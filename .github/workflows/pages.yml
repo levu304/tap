@@ -3,14 +3,14 @@
 # Publishes the canonical install script from scripts/install.sh to the
 # gh-pages branch on every push to main.  The result is served at:
 #
-#   https://tap-dev.github.io/tap/install.sh
+#   https://levu304.github.io/tap/install.sh
 #
 # Settings required (one-time):
-#   1. Go to https://github.com/tap-dev/tap/settings/pages
+#   1. Go to https://github.com/levu304/tap/settings/pages
 #   2. Source → "Deploy from a branch"
 #   3. Branch → "gh-pages" / "/ (root)"
 #
-# If you change the repo URL (tap-dev/tap → something else), update the
+# If you change the repo URL (levu304/tap → something else), update the
 # README's install command and the install.sh URL in release.yml too.
 
 name: Pages

@@ -298,7 +298,7 @@ jobs:
       - name: Test install.sh URL
         run: |
           HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-            "https://tap-dev.github.io/tap/install.sh")
+            "https://levu304.github.io/tap/install.sh")
           echo "install.sh → HTTP ${HTTP_CODE}"
           [ "$HTTP_CODE" = "200" ] || { echo "FAILED"; exit 1; }
 

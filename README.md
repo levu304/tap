@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tap-core.svg)](https://crates.io/crates/tap-core)
 [![npm](https://img.shields.io/npm/v/%40tap%2Fsdk)](https://www.npmjs.com/package/@tap/sdk)
-[![CI](https://img.shields.io/github/actions/workflow/status/tap-dev/tap/ci.yml?branch=main)](https://github.com/tap-dev/tap/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/levu304/tap/ci.yml?branch=main)](https://github.com/levu304/tap/actions)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-blue)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -18,7 +18,7 @@ Get change events from a Postgres database in under five minutes.
 
 ```bash
 # Install the CLI
-curl -fsSL https://tap-dev.github.io/tap/install.sh | sh
+curl -fsSL https://levu304.github.io/tap/install.sh | sh
 
 # Or install the TypeScript SDK
 npm install @tap/sdk
@@ -100,7 +100,7 @@ The engine connects to Postgres via logical replication (`pgoutput` by default, 
 ### CLI Binary
 
 ```bash
-curl -fsSL https://tap-dev.github.io/tap/install.sh | sh
+curl -fsSL https://levu304.github.io/tap/install.sh | sh
 ```
 
 Prebuilt binaries are available for:

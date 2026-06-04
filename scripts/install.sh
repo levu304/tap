@@ -3,8 +3,8 @@
 # tap installer — downloads the latest CLI binary from GitHub Releases
 #
 # Usage:
-#   curl -fsSL https://tap-dev.github.io/tap/install.sh | sh
-#   curl -fsSL https://tap-dev.github.io/tap/install.sh | sh -s -- -b /usr/local/bin
+#   curl -fsSL https://levu304.github.io/tap/install.sh | sh
+#   curl -fsSL https://levu304.github.io/tap/install.sh | sh -s -- -b /usr/local/bin
 #
 # Flags:
 #   -b <path>    Install binary to <path> (default: $HOME/.local/bin)
@@ -17,7 +17,7 @@
 # ===========================================================================
 set -e
 
-TAP_REPO="tap-dev/tap"
+TAP_REPO="levu304/tap"
 BIN_DIR="${TAP_INSTALL_DIR:-${HOME}/.local/bin}"
 VERSION="latest"
 
@@ -29,9 +29,9 @@ while getopts "b:v:h" opt; do
     b) BIN_DIR="$OPTARG" ;;
     v) VERSION="$OPTARG" ;;
     h)
-      echo "tap installer — https://github.com/tap-dev/tap"
+      echo "tap installer — https://github.com/levu304/tap"
       echo ""
-      echo "Usage: curl -fsSL https://tap-dev.github.io/tap/install.sh | sh [-- <flag> ...]"
+      echo "Usage: curl -fsSL https://levu304.github.io/tap/install.sh | sh [-- <flag> ...]"
       echo ""
       echo "Flags:"
       echo "  -b <path>    Install binary to <path> (default: \$HOME/.local/bin)"
