@@ -99,7 +99,7 @@ for target in "${SORTED_TARGETS[@]}"; do
     echo "  Building ${target} → ${output_name} ..."
 
     # Set RUSTFLAGS for musl
-    export RUSTFLAGS="${RUSTFLAGS:-}"
+unset RUSTFLAGS
     if [[ "$target" == "x86_64-unknown-linux-musl" ]]; then
         RUSTFLAGS="$RUSTFLAGS -C target-feature=-crt-static"
     fi
@@ -117,7 +117,7 @@ for target in "${SORTED_TARGETS[@]}"; do
 done
 
 # Reset RUSTFLAGS so subsequent commands aren't affected
-export RUSTFLAGS="${RUSTFLAGS:-}"
+unset RUSTFLAGS
 
 # ===========================================================================
 # Step 3 — Build napi-rs SDK (host platform only)
@@ -127,9 +127,10 @@ echo "--- Step 3/6: Building napi-rs SDK ---"
 SDK_DIR="$REPO_ROOT/packages/sdk-ts"
 
 # Ensure the SDK package has its dependencies installed
-if [[ ! -d "$SDK_DIR/node_modules" ]]; then
+pushd "$SDK_DIR" > /dev/null
+if [[ ! -d "node_modules" ]]; then
     echo "  Installing SDK dependencies..."
-    pnpm install --no-frozen-lockfile
+    pnpm install --frozen-lockfile
 fi
 
 echo "  Building napi native binding for host platform..."
@@ -139,6 +140,7 @@ npx --yes @napi-rs/cli build --platform --release
 echo "  Running napi artifacts..."
 npx --yes @napi-rs/cli artifacts
 echo "  SDK build complete."
+popd > /dev/null
 
 # ===========================================================================
 # Step 4 — Package artifacts into tarballs
