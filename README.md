@@ -3,7 +3,7 @@
 **PostgreSQL Change Data Capture**
 
 [![Crates.io](https://img.shields.io/crates/v/tap-core.svg)](https://crates.io/crates/tap-core)
-[![npm](https://img.shields.io/npm/v/%40tap%2Fsdk)](https://www.npmjs.com/package/@tap/sdk)
+[![npm](https://img.shields.io/npm/v/tap-cdc)](https://www.npmjs.com/package/tap-cdc)
 [![CI](https://img.shields.io/github/actions/workflow/status/levu304/tap/ci.yml?branch=main)](https://github.com/levu304/tap/actions)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-blue)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -21,7 +21,7 @@ Get change events from a Postgres database in under five minutes.
 curl -fsSL https://levu304.github.io/tap/install.sh | sh
 
 # Or install the TypeScript SDK
-npm install @tap/sdk
+npm install tap-cdc
 
 # Scaffold a project
 tap init --db "postgres://user:pass@localhost:5432/mydb"
@@ -38,7 +38,7 @@ curl -N http://127.0.0.1:54321/events
 ## Example
 
 ```typescript
-import { Tap } from "@tap/sdk";
+import { Tap } from "tap-cdc";
 
 const tap = new Tap({
   connection: "postgresql://user:pass@localhost/mydb",
@@ -113,7 +113,7 @@ Prebuilt binaries are available for:
 ### TypeScript SDK
 
 ```bash
-npm install @tap/sdk
+npm install tap-cdc
 ```
 
 The SDK ships as a native Node.js addon compiled via `napi-rs`. The correct platform binary is selected automatically at install time via `@napi-rs/cli` artifact resolution.
@@ -175,7 +175,7 @@ initial_backoff_ms = 1000
 ## SDK API
 
 ```typescript
-import { Tap, type TapConfig, type ChangeEvent } from "@tap/sdk";
+import { Tap, type TapConfig, type ChangeEvent } from "tap-cdc";
 
 interface TapConfig {
   connection: string;           // Postgres connection string

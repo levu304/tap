@@ -1,5 +1,5 @@
 /**
- * @tap/sdk — PostgreSQL Change Data Capture SDK
+ * tap-cdc — PostgreSQL Change Data Capture SDK
  *
  * Native Node.js binding to the Tap CDC engine via napi-rs.
  * Provides a `Tap` class for managing CDC sessions with
@@ -7,7 +7,7 @@
  *
  * @example
  * ```ts
- * import { Tap } from "@tap/sdk";
+ * import { Tap } from "tap-cdc";
  *
  * const tap = new Tap({
  *   connection: "postgresql://user:pass@localhost/db",

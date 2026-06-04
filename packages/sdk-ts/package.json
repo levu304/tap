@@ -1,5 +1,5 @@
 {
-  "name": "@tap/sdk",
+  "name": "tap-cdc",
   "version": "0.1.0",
   "description": "TypeScript SDK for Tap — PostgreSQL Change Data Capture",
   "main": "index.js",
@@ -29,13 +29,10 @@
     "vitest": "^3.0.0"
   },
   "optionalDependencies": {
-    "@tap/sdk-darwin-arm64": "0.1.0",
-    "@tap/sdk-darwin-x64": "0.1.0",
-    "@tap/sdk-linux-arm64-gnu": "0.1.0",
-    "@tap/sdk-linux-x64-gnu": "0.1.0",
-    "@tap/sdk-linux-x64-musl": "0.1.0"
-  },
-  "publishConfig": {
-    "access": "public"
+    "tap-cdc-darwin-arm64": "0.1.0",
+    "tap-cdc-darwin-x64": "0.1.0",
+    "tap-cdc-linux-arm64-gnu": "0.1.0",
+    "tap-cdc-linux-x64-gnu": "0.1.0",
+    "tap-cdc-linux-x64-musl": "0.1.0"
   }
 }

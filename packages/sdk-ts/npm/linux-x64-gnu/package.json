@@ -1,5 +1,5 @@
 {
-  "name": "@tap/sdk-linux-x64-gnu",
+  "name": "tap-cdc-linux-x64-gnu",
   "version": "0.1.0",
   "os": ["linux"],
   "cpu": ["x64"],

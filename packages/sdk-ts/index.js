@@ -1,8 +1,8 @@
 /* eslint-disable */
-/* @tap/sdk — Platform-specific native binding resolver.
+/* tap-cdc — Platform-specific native binding resolver.
  *
  * Loads the correct `.node` binary for the current platform from the
- * platform-specific optional dependency (e.g. `@tap/sdk-darwin-arm64`).
+ * platform-specific optional dependency (e.g. `tap-cdc-darwin-arm64`).
  * Falls back to a local development build when the platform package is
  * not installed (e.g. after `napi build --platform`).
  */
@@ -57,7 +57,7 @@ switch (platform) {
     switch (arch) {
       case "arm64": {
         try {
-          nativeBinding = require("@tap/sdk-darwin-arm64");
+          nativeBinding = require("tap-cdc-darwin-arm64");
         } catch (e) {
           loadError = e;
         }
@@ -65,7 +65,7 @@ switch (platform) {
       }
       case "x64": {
         try {
-          nativeBinding = require("@tap/sdk-darwin-x64");
+          nativeBinding = require("tap-cdc-darwin-x64");
         } catch (e) {
           loadError = e;
         }
@@ -74,8 +74,8 @@ switch (platform) {
       default:
         throw new Error(
           `Unsupported architecture on macOS: ${arch}. ` +
-            `@tap/sdk supports arm64 and x64. ` +
-            `Please file an issue at https://github.com/levu/tap/issues`,
+            `tap-cdc supports arm64 and x64. ` +
+            `Please file an issue at https://github.com/levu304/tap/issues`,
         );
     }
     break;
@@ -85,12 +85,12 @@ switch (platform) {
       case "arm64": {
         if (musl) {
           throw new Error(
-            "The platform linux-arm64-musl is not supported by @tap/sdk. " +
-              "Please file an issue at https://github.com/levu/tap/issues",
+            "The platform linux-arm64-musl is not supported by tap-cdc. " +
+              "Please file an issue at https://github.com/levu304/tap/issues",
           );
         }
         try {
-          nativeBinding = require("@tap/sdk-linux-arm64-gnu");
+          nativeBinding = require("tap-cdc-linux-arm64-gnu");
         } catch (e) {
           loadError = e;
         }
@@ -99,13 +99,13 @@ switch (platform) {
       case "x64": {
         if (musl) {
           try {
-            nativeBinding = require("@tap/sdk-linux-x64-musl");
+            nativeBinding = require("tap-cdc-linux-x64-musl");
           } catch (e) {
             loadError = e;
           }
         } else {
           try {
-            nativeBinding = require("@tap/sdk-linux-x64-gnu");
+            nativeBinding = require("tap-cdc-linux-x64-gnu");
           } catch (e) {
             loadError = e;
           }
@@ -115,8 +115,8 @@ switch (platform) {
       default:
         throw new Error(
           `Unsupported architecture on Linux: ${arch}. ` +
-            `@tap/sdk supports arm64 and x64. ` +
-            `Please file an issue at https://github.com/levu/tap/issues`,
+            `tap-cdc supports arm64 and x64. ` +
+            `Please file an issue at https://github.com/levu304/tap/issues`,
         );
     }
     break;
@@ -124,8 +124,8 @@ switch (platform) {
   default:
     throw new Error(
       `Unsupported OS: ${platform}, architecture: ${arch}. ` +
-        `@tap/sdk currently supports macOS (arm64, x64) and Linux (arm64, x64). ` +
-        `Please file an issue at https://github.com/levu/tap/issues`,
+        `tap-cdc currently supports macOS (arm64, x64) and Linux (arm64, x64). ` +
+        `Please file an issue at https://github.com/levu304/tap/issues`,
     );
 }
 
@@ -176,7 +176,7 @@ if (!nativeBinding) {
   }
 
   throw new Error(
-    `Failed to load native binding for @tap/sdk on ${platform}-${arch}.\n\n` +
+    `Failed to load native binding for tap-cdc on ${platform}-${arch}.\n\n` +
       `This usually means one of the following:\n` +
       `  1. \`npm install\` did not download the correct platform package.\n` +
       `     Try reinstalling: rm -rf node_modules && npm install\n` +
@@ -187,7 +187,7 @@ if (!nativeBinding) {
       `  4. The package manager hoisted the platform package incorrectly.\n` +
       `     Try: npm dedupe\n\n` +
       `If none of these apply, please file an issue at:\n` +
-      `  https://github.com/levu/tap/issues`,
+      `  https://github.com/levu304/tap/issues`,
   );
 }
 

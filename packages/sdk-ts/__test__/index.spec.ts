@@ -1,5 +1,5 @@
 /**
- * Tests for @tap/sdk — TypeScript SDK for Tap CDC engine.
+ * Tests for tap-cdc — TypeScript SDK for Tap CDC engine.
  *
  * NOTE: These are stub tests. They will be expanded by the qa-expert agent.
  */

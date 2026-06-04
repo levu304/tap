@@ -230,7 +230,7 @@ jobs:
             assets/*
 
   # ===========================================================================
-  # npm-publish — publish @tap/sdk + platform bindings to npm
+  # npm-publish — publish tap-cdc + platform bindings to npm
   # ===========================================================================
   npm-publish:
     name: Publish to npm
@@ -281,7 +281,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish main @tap/sdk package
+      - name: Publish main tap-cdc package
         run: npm publish --access public
         working-directory: packages/sdk-ts
         env:
@@ -304,6 +304,6 @@ jobs:
 
       - name: Test npm package
         run: |
-          PUBLISHED_VER=$(npm view @tap/sdk version 2>/dev/null)
-          echo "@tap/sdk → v${PUBLISHED_VER}"
+          PUBLISHED_VER=$(npm view tap-cdc version 2>/dev/null)
+          echo "tap-cdc → v${PUBLISHED_VER}"
           [ -n "$PUBLISHED_VER" ] || { echo "FAILED — package not found"; exit 1; }

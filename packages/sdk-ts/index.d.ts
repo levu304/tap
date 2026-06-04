@@ -1,5 +1,5 @@
 /**
- * @tap/sdk — Platform-native binding entry point.
+ * tap-cdc — Platform-native binding entry point.
  *
  * This file re-exports all public types and the default `Tap` class from
  * the TypeScript source wrapper.  At runtime `index.js` resolves the
@@ -7,7 +7,7 @@
  *
  * @example
  * ```ts
- * import { Tap, ChangeEvent, TapConfig } from "@tap/sdk";
+ * import { Tap, ChangeEvent, TapConfig } from "tap-cdc";
  *
  * const tap = new Tap({ connection: "postgresql://localhost/mydb" });
  * tap.onChange((event: ChangeEvent) => console.log(event.after));
