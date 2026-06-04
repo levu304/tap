@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "os": ["darwin"],
   "cpu": ["x64"],
-  "main": "tap-sdk.darwin-x64.node",
-  "files": ["tap-sdk.darwin-x64.node"],
+  "description": "Native binding for tap-cdc on macOS x64 (v0.1.0 stub — see README)",
+  "main": "index.js",
+  "files": ["index.js", "README.md"],
   "license": "Apache-2.0",
   "engines": {
     "node": ">= 18"

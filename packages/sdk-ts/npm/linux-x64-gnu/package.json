@@ -4,8 +4,9 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "libc": ["glibc"],
-  "main": "tap-sdk.linux-x64-gnu.node",
-  "files": ["tap-sdk.linux-x64-gnu.node"],
+  "description": "Native binding for tap-cdc on Linux x64 (glibc) (v0.1.0 stub — see README)",
+  "main": "index.js",
+  "files": ["index.js", "README.md"],
   "license": "Apache-2.0",
   "engines": {
     "node": ">= 18"
