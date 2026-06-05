@@ -279,10 +279,8 @@ pub(crate) async fn perform_scram_auth(
             }
             Ok(())
         }
-        other => {
-            Err(proto_err(format!(
-                "expected SASLFinal (12) or Ok (0), got {other}"
-            )))
-        }
+        other => Err(proto_err(format!(
+            "expected SASLFinal (12) or Ok (0), got {other}"
+        ))),
     }
 }
