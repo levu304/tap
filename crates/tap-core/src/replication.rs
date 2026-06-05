@@ -45,6 +45,11 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// server hasn't requested one.
 const HEARTBEAT_INTERVAL_SECS: u64 = 10;
 
+/// Read deadline (seconds) for the background reader loop.
+/// Postgres keepalive defaults to ~10 s, so 60 s is generous enough
+/// to survive transient delays while still detecting half-open TCP.
+const READ_TIMEOUT_SECS: u64 = 60;
+
 /// SSLRequest code for the pre-TLS negotiation message.
 /// Sent as: Int32(8) | Int32(80877103)
 const SSL_REQUEST_CODE: i32 = 80877103;
@@ -572,11 +577,25 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
     let mut last_keepalive_time: tokio::time::Instant = tokio::time::Instant::now();
 
     loop {
-        // Read message type byte
-        let msg_type = match read_u8(&mut stream).await {
-            Ok(t) => t,
-            Err(e) => {
+        // Read message type byte with a timeout to detect half-open TCP.
+        let msg_type = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(READ_TIMEOUT_SECS),
+            read_u8(&mut stream),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
                 let _ = tx.send(Err(e)).await;
+                return;
+            }
+            Err(_elapsed) => {
+                let _ = tx
+                    .send(Err(TapError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("read timed out after {READ_TIMEOUT_SECS}s"),
+                    ))))
+                    .await;
                 return;
             }
         };
