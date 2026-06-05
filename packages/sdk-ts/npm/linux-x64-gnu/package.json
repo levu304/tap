@@ -1,12 +1,21 @@
 {
   "name": "tap-cdc-linux-x64-gnu",
   "version": "0.1.1",
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "libc": ["glibc"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
   "description": "Native binding for tap-cdc on Linux x64 (glibc) (v0.1.0 stub — see README)",
   "main": "index.js",
-  "files": ["index.js", "README.md"],
+  "files": [
+    "index.js",
+    "README.md"
+  ],
   "license": "Apache-2.0",
   "engines": {
     "node": ">= 18"
