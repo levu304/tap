@@ -958,7 +958,12 @@ fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
 
 /// Hex-encode bytes (lowercase).
 fn hex_encode(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(data.len() * 2);
+    for b in data {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------
