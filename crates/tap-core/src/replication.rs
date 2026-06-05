@@ -24,7 +24,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{validate_identifier, SourceConfig, SslMode};
+use crate::config::{SourceConfig, SslMode, validate_identifier};
 use crate::error::TapError;
 use crate::postgres::Lsn;
 
@@ -173,11 +173,7 @@ impl Stream for ReplicationStream {
         // before returning, which would keep the channel alive).  Log a
         // warning so the operator has a diagnostic hint.
         if let Poll::Ready(None) = &result {
-            if self
-                .reader_handle
-                .as_ref()
-                .is_some_and(|h| h.is_finished())
-            {
+            if self.reader_handle.as_ref().is_some_and(|h| h.is_finished()) {
                 warn!("reader task finished while channel closed — possible panic");
             }
         }
@@ -236,11 +232,7 @@ pub async fn start(
         MaybeTls::Plain(tcp)
     } else {
         info!("sending SSLRequest handshake");
-        let ssl_request = [
-            (8i32).to_be_bytes(),
-            SSL_REQUEST_CODE.to_be_bytes(),
-        ]
-        .concat();
+        let ssl_request = [(8i32).to_be_bytes(), SSL_REQUEST_CODE.to_be_bytes()].concat();
         tokio::io::AsyncWriteExt::write_all(&mut tcp, &ssl_request)
             .await
             .map_err(|e| {
@@ -542,10 +534,8 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                             )));
                         }
                         if let Some(sig_b64) = server_final.strip_prefix("v=") {
-                            let server_key =
-                                hmac_sha256(&salted_password, b"Server Key")?;
-                            let expected_sig =
-                                hmac_sha256(&server_key, auth_message.as_bytes())?;
+                            let server_key = hmac_sha256(&salted_password, b"Server Key")?;
+                            let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes())?;
                             let expected_b64 =
                                 base64::engine::general_purpose::STANDARD.encode(&expected_sig);
                             // Constant-time compare would be ideal, but string
@@ -855,9 +845,13 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
         if last_keepalive_time.elapsed()
             >= tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
         {
-            if let Err(e) =
-                send_standby_status_update(&mut stream, last_received_lsn, last_flushed_lsn, last_received_lsn)
-                    .await
+            if let Err(e) = send_standby_status_update(
+                &mut stream,
+                last_received_lsn,
+                last_flushed_lsn,
+                last_received_lsn,
+            )
+            .await
             {
                 let _ = tx.send(Err(e)).await;
                 return;
@@ -1100,17 +1094,16 @@ fn sha256(data: &[u8]) -> Result<Vec<u8>, TapError> {
 
 /// Compute HMAC-SHA-256.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, TapError> {
-    let key =
-        openssl::pkey::PKey::hmac(key)
-            .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC key failed: {e}")))?;
+    let key = openssl::pkey::PKey::hmac(key)
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC key failed: {e}")))?;
     let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key)
         .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC signer failed: {e}")))?;
-    signer.update(data).map_err(|e| {
-        TapError::PostgresConnectionRedacted(format!("HMAC update failed: {e}"))
-    })?;
-    signer.sign_to_vec().map_err(|e| {
-        TapError::PostgresConnectionRedacted(format!("HMAC sign failed: {e}"))
-    })
+    signer
+        .update(data)
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC update failed: {e}")))?;
+    signer
+        .sign_to_vec()
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC sign failed: {e}")))
 }
 
 /// SCRAM Hi function: PBKDF2-HMAC-SHA256 with `iterations` rounds.
@@ -1211,9 +1204,9 @@ mod tests {
     fn xlog_data(payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(25 + payload.len());
         buf.push(b'w');
-        buf.extend_from_slice(&0i64.to_be_bytes());   // start_lsn
-        buf.extend_from_slice(&100i64.to_be_bytes());  // end_lsn
-        buf.extend_from_slice(&0i64.to_be_bytes());    // timestamp
+        buf.extend_from_slice(&0i64.to_be_bytes()); // start_lsn
+        buf.extend_from_slice(&100i64.to_be_bytes()); // end_lsn
+        buf.extend_from_slice(&0i64.to_be_bytes()); // timestamp
         buf.extend_from_slice(payload);
         buf
     }
@@ -1278,7 +1271,7 @@ mod tests {
         let mut msg = Vec::with_capacity(8);
         msg.push(b'W');
         msg.extend_from_slice(&7i32.to_be_bytes()); // len = 7
-        msg.push(0);  // overall_format = text
+        msg.push(0); // overall_format = text
         msg.extend_from_slice(&0i16.to_be_bytes()); // num_cols = 0
         msg
     }
@@ -1458,15 +1451,15 @@ mod tests {
 
             // 5. Compute expected server signature
             let password = config.password.as_bytes();
-            let salt =
-                base64::engine::general_purpose::STANDARD.decode(SALT_B64).unwrap();
+            let salt = base64::engine::general_purpose::STANDARD
+                .decode(SALT_B64)
+                .unwrap();
             let salted_password = hi(password, &salt, ITERATIONS).unwrap();
             let server_key = hmac_sha256(&salted_password, b"Server Key").unwrap();
             let auth_msg =
                 format!("{client_first_bare},{server_first},{client_final_without_proof}");
             let expected_sig = hmac_sha256(&server_key, auth_msg.as_bytes()).unwrap();
-            let expected_b64 =
-                base64::engine::general_purpose::STANDARD.encode(&expected_sig);
+            let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&expected_sig);
 
             // 6. Write AuthenticationSASLFinal (type 12) with valid sig
             let server_final = format!("v={expected_b64}");
@@ -1483,7 +1476,11 @@ mod tests {
         };
 
         let (result, _) = tokio::join!(auth, srv);
-        assert!(result.is_ok(), "SCRAM auth should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "SCRAM auth should succeed: {:?}",
+            result.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1512,10 +1509,7 @@ mod tests {
         );
 
         let response = format!("md5{hash}");
-        assert_eq!(
-            response,
-            "md5a3576f1ae039b8996bc4fc2720f9c71a"
-        );
+        assert_eq!(response, "md5a3576f1ae039b8996bc4fc2720f9c71a");
     }
 
     // ------------------------------------------------------------------
@@ -1556,8 +1550,7 @@ mod tests {
         server.write_all(&copy_done()).await.unwrap();
 
         // Reader should exit on CopyDone without sending anything
-        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await;
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
 
         match result {
             Ok(None) => { /* channel closed cleanly */ }
@@ -1588,7 +1581,10 @@ mod tests {
 
         let handle = tokio::spawn(reader_task(stream, tx));
 
-        server.write_all(&error_response("test error")).await.unwrap();
+        server
+            .write_all(&error_response("test error"))
+            .await
+            .unwrap();
 
         let item = rx.recv().await;
         match item {
@@ -1725,9 +1721,7 @@ mod tests {
         let mut stream = MaybeTls::Test(client);
 
         // Write a ReadyForQuery message then call the helper
-        let helper = async {
-            read_ready_for_query(&mut stream).await
-        };
+        let helper = async { read_ready_for_query(&mut stream).await };
 
         let feeder = async {
             // Feed a NoticeResponse (should be skipped) then ReadyForQuery
@@ -1752,9 +1746,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(65536);
         let mut stream = MaybeTls::Test(client);
 
-        let helper = async {
-            read_copy_both_response(&mut stream).await
-        };
+        let helper = async { read_copy_both_response(&mut stream).await };
 
         let feeder = async {
             let mut server = server;
@@ -1770,13 +1762,14 @@ mod tests {
         let (client, server) = tokio::io::duplex(65536);
         let mut stream = MaybeTls::Test(client);
 
-        let helper = async {
-            read_ready_for_query(&mut stream).await
-        };
+        let helper = async { read_ready_for_query(&mut stream).await };
 
         let feeder = async {
             let mut server = server;
-            server.write_all(&error_response("syntax error")).await.unwrap();
+            server
+                .write_all(&error_response("syntax error"))
+                .await
+                .unwrap();
         };
 
         let (result, _) = tokio::join!(helper, feeder);
@@ -1797,9 +1790,7 @@ mod tests {
         let config = test_config();
         let mut stream = MaybeTls::Test(client);
 
-        let helper = async {
-            authenticate(&mut stream, &config).await
-        };
+        let helper = async { authenticate(&mut stream, &config).await };
 
         let feeder = async {
             let mut server = server;
@@ -1807,7 +1798,11 @@ mod tests {
         };
 
         let (result, _) = tokio::join!(helper, feeder);
-        assert!(result.is_ok(), "authenticate with Ok should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "authenticate with Ok should succeed: {:?}",
+            result.err()
+        );
     }
 
     /// authenticate() sends cleartext password and handles AuthOk.
@@ -1817,9 +1812,7 @@ mod tests {
         let config = test_config();
         let mut stream = MaybeTls::Test(client);
 
-        let helper = async {
-            authenticate(&mut stream, &config).await
-        };
+        let helper = async { authenticate(&mut stream, &config).await };
 
         let feeder = async {
             let mut server = server;
@@ -1840,7 +1833,11 @@ mod tests {
         };
 
         let (result, _) = tokio::join!(helper, feeder);
-        assert!(result.is_ok(), "authenticate with cleartext should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "authenticate with cleartext should succeed: {:?}",
+            result.err()
+        );
     }
 
     /// authenticate() handles MD5 password request.
@@ -1852,9 +1849,7 @@ mod tests {
         config.password = "password".into();
         let mut stream = MaybeTls::Test(client);
 
-        let helper = async {
-            authenticate(&mut stream, &config).await
-        };
+        let helper = async { authenticate(&mut stream, &config).await };
 
         let feeder = async {
             let mut server = server;
@@ -1863,7 +1858,7 @@ mod tests {
             auth_req.push(b'R');
             let mut payload = Vec::new();
             payload.extend_from_slice(&5i32.to_be_bytes()); // auth type = MD5
-            payload.extend_from_slice(&[1u8, 2, 3, 4]);    // salt
+            payload.extend_from_slice(&[1u8, 2, 3, 4]); // salt
             auth_req.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
             auth_req.extend_from_slice(&payload);
             server.write_all(&auth_req).await.unwrap();
@@ -1895,7 +1890,11 @@ mod tests {
         };
 
         let (result, _) = tokio::join!(helper, feeder);
-        assert!(result.is_ok(), "authenticate with MD5 should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "authenticate with MD5 should succeed: {:?}",
+            result.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1972,8 +1971,7 @@ mod tests {
             server.read_exact(&mut cf_body).await.unwrap();
 
             // 5. Send SASLFinal with WRONG signature
-            let wrong_sig =
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            let wrong_sig = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
             let server_final = format!("v={wrong_sig}");
             let mut final_payload = Vec::new();
             final_payload.extend_from_slice(&12i32.to_be_bytes());
