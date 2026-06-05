@@ -45,6 +45,10 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// server hasn't requested one.
 const HEARTBEAT_INTERVAL_SECS: u64 = 10;
 
+/// SSLRequest code for the pre-TLS negotiation message.
+/// Sent as: Int32(8) | Int32(80877103)
+const SSL_REQUEST_CODE: i32 = 80877103;
+
 // ---------------------------------------------------------------------------
 // MaybeTls — unified AsyncRead + AsyncWrite for plain / TLS streams
 // ---------------------------------------------------------------------------
@@ -168,14 +172,51 @@ pub async fn start(
     // 1. TCP connect
     let addr = format!("{}:{}", config.host, config.port);
     info!("connecting to {addr}");
-    let tcp = tokio::net::TcpStream::connect(&addr)
+    let mut tcp = tokio::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| TapError::PostgresConnectionRedacted(format!("TCP connect failed: {e}")))?;
 
     // 2. TLS wrapper (if configured)
+    //
+    // Before wrapping, the Postgres postmaster requires an explicit SSLRequest
+    // handshake.  We send 8 bytes (length=8, code=80877103) and the server
+    // responds with a single byte: 'S' (proceed with TLS) or 'N' (refuse).
+    // Without this pre-exchange, the postmaster sees ClientHello bytes as a
+    // malformed startup message and closes the connection.
     let mut stream: MaybeTls = if config.ssl_mode == SslMode::Disable {
         MaybeTls::Plain(tcp)
     } else {
+        info!("sending SSLRequest handshake");
+        let ssl_request = [
+            (8i32).to_be_bytes(),
+            SSL_REQUEST_CODE.to_be_bytes(),
+        ]
+        .concat();
+        tokio::io::AsyncWriteExt::write_all(&mut tcp, &ssl_request)
+            .await
+            .map_err(|e| {
+                TapError::PostgresConnectionRedacted(format!("SSLRequest write failed: {e}"))
+            })?;
+        tokio::io::AsyncWriteExt::flush(&mut tcp)
+            .await
+            .map_err(|e| {
+                TapError::PostgresConnectionRedacted(format!("SSLRequest flush failed: {e}"))
+            })?;
+
+        let mut response = [0u8; 1];
+        tokio::io::AsyncReadExt::read_exact(&mut tcp, &mut response)
+            .await
+            .map_err(|e| {
+                TapError::PostgresConnectionRedacted(format!("SSLRequest read failed: {e}"))
+            })?;
+
+        if response[0] != b'S' {
+            return Err(TapError::PostgresConnectionRedacted(format!(
+                "server rejected TLS connection (response byte: 0x{:02x})",
+                response[0]
+            )));
+        }
+
         info!("wrapping connection with TLS");
         let native_connector = native_tls::TlsConnector::builder().build().map_err(|e| {
             TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
