@@ -179,7 +179,33 @@ impl PgConnection {
                 });
                 (c, jh)
             }
-            _ => {
+            crate::config::SslMode::Require => {
+                let connector = native_tls::TlsConnector::builder()
+                    .danger_accept_invalid_certs(true)
+                    .build()
+                    .map_err(|e| {
+                        TapError::PostgresConnectionRedacted(format!(
+                            "failed to build TLS connector: {e}"
+                        ))
+                    })?;
+                let (c, conn) = tokio_postgres::connect(
+                    &conn_str,
+                    postgres_native_tls::MakeTlsConnector::new(connector),
+                )
+                .await
+                .map_err(|e| {
+                    TapError::PostgresConnectionRedacted(
+                        e.to_string().replace(&config.password, "<REDACTED>"),
+                    )
+                })?;
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = conn.await {
+                        tracing::error!("Postgres connection error: {e}");
+                    }
+                });
+                (c, jh)
+            }
+            crate::config::SslMode::VerifyCa | crate::config::SslMode::VerifyFull => {
                 let connector = native_tls::TlsConnector::builder().build().map_err(|e| {
                     TapError::PostgresConnectionRedacted(format!(
                         "failed to build TLS connector: {e}"
@@ -467,7 +493,31 @@ pub async fn connect_plain(
             });
             (c, jh)
         }
-        _ => {
+        crate::config::SslMode::Require => {
+            let connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .map_err(|e| {
+                    TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
+                })?;
+            let (c, conn) = tokio_postgres::connect(
+                &conn_str,
+                postgres_native_tls::MakeTlsConnector::new(connector),
+            )
+            .await
+            .map_err(|e| {
+                TapError::PostgresConnectionRedacted(
+                    e.to_string().replace(&config.password, "<REDACTED>"),
+                )
+            })?;
+            let jh = tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    tracing::error!("Postgres (plain) connection error: {e}");
+                }
+            });
+            (c, jh)
+        }
+        crate::config::SslMode::VerifyCa | crate::config::SslMode::VerifyFull => {
             let connector = native_tls::TlsConnector::builder().build().map_err(|e| {
                 TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
             })?;
