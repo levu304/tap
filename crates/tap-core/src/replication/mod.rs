@@ -30,6 +30,7 @@
 //! | `VerifyFull` | TLS required. Full verification: trusted CA +
 //!   matching hostname. |
 
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tracing::debug;
 
@@ -68,6 +69,11 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 10;
 /// Postgres keepalive defaults to ~10 s, so 60 s is generous enough
 /// to survive transient delays while still detecting half-open TCP.
 const READ_TIMEOUT_SECS: u64 = 60;
+
+/// Timeout (seconds) for the SCRAM-SHA-256 SASL authentication exchange.
+/// The exchange involves at most 3 round-trips and should complete in
+/// under a second — 30 s is generous for slow networks.
+const SCRAM_AUTH_TIMEOUT_SECS: u64 = 30;
 
 /// SSLRequest code for the pre-TLS negotiation message.
 /// Sent as: Int32(8) | Int32(80877103)
@@ -166,7 +172,16 @@ pub(crate) async fn authenticate(
             }
             10 => {
                 debug!("auth: SASL requested");
-                return perform_scram_auth(stream, config).await;
+                return tokio::time::timeout(
+                    Duration::from_secs(SCRAM_AUTH_TIMEOUT_SECS),
+                    perform_scram_auth(stream, config),
+                )
+                .await
+                .map_err(|_elapsed| {
+                    TapError::PostgresConnectionRedacted(format!(
+                        "SCRAM auth timed out after {SCRAM_AUTH_TIMEOUT_SECS}s"
+                    ))
+                })?;
             }
             other => {
                 return Err(TapError::PostgresConnectionRedacted(format!(
