@@ -653,8 +653,8 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
                         let _ts = i64::from_be_bytes(payload[9..17].try_into().unwrap());
                         let reply_required = payload.len() >= 18 && payload[17] != 0;
 
-                        last_flushed_lsn = wal_end;
-                        last_received_lsn = wal_end;
+                        last_flushed_lsn = last_flushed_lsn.max(wal_end);
+                        last_received_lsn = last_received_lsn.max(wal_end);
 
                         if reply_required {
                             debug!("sending standby status update (keepalive requested)");
