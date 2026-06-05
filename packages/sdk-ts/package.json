@@ -11,16 +11,13 @@
   ],
   "napi": {
     "name": "tap-sdk",
-    "triples": {
-      "defaults": true,
-      "additional": [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl"
-      ]
-    }
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl"
+    ]
   },
   "scripts": {
     "build": "napi build --platform --release",
@@ -34,10 +31,8 @@
     "vitest": "^3.0.0"
   },
   "optionalDependencies": {
-    "tap-cdc-darwin-x64": "0.1.0",
-    "tap-cdc-linux-x64-gnu": "0.1.0",
-    "tap-cdc-darwin-arm64": "0.1.0",
-    "tap-cdc-linux-arm64-gnu": "0.1.0",
-    "tap-cdc-linux-x64-musl": "0.1.0"
+    "tap-cdc-win32-x64-msvc": "0.1.1",
+    "tap-cdc-darwin-x64": "0.1.1",
+    "tap-cdc-linux-x64-gnu": "0.1.1"
   }
 }
