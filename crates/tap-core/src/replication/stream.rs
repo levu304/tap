@@ -180,8 +180,11 @@ pub async fn start(
                 tls_builder.danger_accept_invalid_certs(true);
             }
             SslMode::VerifyCa => {
-                // CA-issued certs are accepted, but the hostname is NOT
-                // checked (matching PostgreSQL's sslmode=verify-ca).
+                // ⚠️ SECURITY: CA-issued certs are accepted, but the hostname
+                // is NOT checked (matching PostgreSQL's sslmode=verify-ca).
+                // This means a valid cert issued to *any* hostname will be
+                // accepted.  Prefer SslMode::VerifyFull in production.
+                warn!("SslMode::VerifyCa: server certificate hostname will NOT be verified");
                 tls_builder.danger_accept_invalid_hostnames(true);
             }
             SslMode::VerifyFull => {}
