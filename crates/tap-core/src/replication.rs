@@ -1031,9 +1031,18 @@ fn rand_compat() -> u32 {
     (z ^ (z >> 31)) as u32
 }
 
+/// SASL-prep the username per RFC 5802 §7 and RFC 4013.
+///
+/// Characters `,` and `=` in usernames are escaped as `=2C` and `=3D`
+/// respectively. The escape order (first `=`, then `,`) ensures that
+/// already-escaped sequences like `=3D` are not double-escaped.
+fn saslprep_user(user: &str) -> String {
+    user.replace('=', "=3D").replace(',', "=2C")
+}
+
 /// Build the SCRAM client-first-message-bare without the initial `n,,` prefix.
 fn scram_client_first_bare(config: &SourceConfig) -> String {
-    format!("n={}", config.user)
+    format!("n={}", saslprep_user(&config.user))
 }
 
 /// Parse SCRAM server-first message.
@@ -2117,6 +2126,50 @@ mod tests {
 
         let msg = extract_error_message(&payload);
         assert_eq!(msg, "relation does not exist");
+    }
+
+    #[test]
+    fn test_saslprep_user() {
+        // No special chars — unchanged
+        assert_eq!(saslprep_user("alice"), "alice");
+        assert_eq!(saslprep_user(""), "");
+
+        // Comma → =2C
+        assert_eq!(saslprep_user("a,b"), "a=2Cb");
+
+        // Equals → =3D
+        assert_eq!(saslprep_user("a=b"), "a=3Db");
+
+        // Both
+        assert_eq!(saslprep_user("a=b,c"), "a=3Db=2Cc");
+
+        // Already-escaped sequences not double-escaped (correct order)
+        assert_eq!(saslprep_user("a=3Db"), "a=3D3Db");
+    }
+
+    #[test]
+    fn test_scram_client_first_bare_saslprep() {
+        assert_eq!(
+            scram_client_first_bare(&SourceConfig {
+                user: "alice".into(),
+                ..SourceConfig::default()
+            }),
+            "n=alice"
+        );
+        assert_eq!(
+            scram_client_first_bare(&SourceConfig {
+                user: "a=b,c".into(),
+                ..SourceConfig::default()
+            }),
+            "n=a=3Db=2Cc"
+        );
+        assert_eq!(
+            scram_client_first_bare(&SourceConfig {
+                user: "test,user=1".into(),
+                ..SourceConfig::default()
+            }),
+            "n=test=2Cuser=3D1"
+        );
     }
 
     #[test]
