@@ -454,9 +454,17 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                         return Ok(());
                     }
                     12 => {
-                        let _server_final = read_string_to_nul(stream).await?;
+                        let server_final = read_string_to_nul(stream).await?;
                         debug!("SASL server-final received");
-                        // Verify server signature (optional but recommended)
+                        // RFC 5802 §5: server-final is either
+                        //   v=base64sig   (success)
+                        //   e=errorcode   (failure)
+                        if let Some(err) = server_final.strip_prefix("e=") {
+                            return Err(TapError::PostgresConnectionRedacted(format!(
+                                "SCRAM authentication failed: {err}"
+                            )));
+                        }
+                        // H2 will add v= signature verification here.
                         return Ok(());
                     }
                     other => {
