@@ -22,7 +22,7 @@ use base64::Engine;
 use futures::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::{validate_identifier, SourceConfig, SslMode};
 use crate::error::TapError;
@@ -346,20 +346,20 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                 // AuthenticationSASL
                 debug!("auth: SASL requested");
                 let mechanisms = read_sasl_mechanisms(stream).await?;
-                let chosen = mechanisms
-                    .iter()
-                    .find(|m| *m == "SCRAM-SHA-256")
-                    .or_else(|| mechanisms.iter().find(|m| *m == "SCRAM-SHA-256-PLUS"))
-                    .ok_or_else(|| {
-                        TapError::PostgresConnectionRedacted(
-                            "no supported SASL mechanism found (need SCRAM-SHA-256)".into(),
-                        )
-                    })?;
-
-                if chosen == "SCRAM-SHA-256-PLUS" {
-                    // We don't support channel binding, but we can still
-                    // fall through with regular SCRAM-SHA-256.
-                    warn!("SCRAM-SHA-256-PLUS requested but not implemented; server may reject");
+                // Prefer SCRAM-SHA-256. If the server only offers
+                // SCRAM-SHA-256-PLUS, reject — we don't support channel binding.
+                if mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
+                    // Proceed with SCRAM-SHA-256 below
+                } else if mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS") {
+                    return Err(TapError::PostgresConnectionRedacted(
+                        "server requires SCRAM-SHA-256-PLUS (channel binding), \
+                         but this client does not support it"
+                            .into(),
+                    ));
+                } else {
+                    return Err(TapError::PostgresConnectionRedacted(
+                        "no supported SASL mechanism found (need SCRAM-SHA-256)".into(),
+                    ));
                 }
 
                 let password = config.password.as_bytes();
