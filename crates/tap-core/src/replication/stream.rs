@@ -174,10 +174,14 @@ pub async fn start(
         let mut tls_builder = native_tls::TlsConnector::builder();
         match config.ssl_mode {
             SslMode::Require => {
+                // Accept any server certificate (including self-signed) but
+                // still verify the hostname matches.  Users who need to
+                // disable hostname verification should use VerifyCa.
                 tls_builder.danger_accept_invalid_certs(true);
-                tls_builder.danger_accept_invalid_hostnames(true);
             }
             SslMode::VerifyCa => {
+                // CA-issued certs are accepted, but the hostname is NOT
+                // checked (matching PostgreSQL's sslmode=verify-ca).
                 tls_builder.danger_accept_invalid_hostnames(true);
             }
             SslMode::VerifyFull => {}

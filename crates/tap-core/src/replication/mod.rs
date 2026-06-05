@@ -24,7 +24,7 @@
 //! |---|---|
 //! | `Disable` | Connect without TLS. |
 //! | `Require` | TLS required. Accepts any certificate (self-signed
-//!   included). |
+//!   included) but still verifies the hostname matches. |
 //! | `VerifyCa` | TLS required. Verifies the server certificate is
 //!   signed by a trusted CA but does **not** check the hostname. |
 //! | `VerifyFull` | TLS required. Full verification: trusted CA +
