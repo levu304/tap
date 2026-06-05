@@ -56,6 +56,50 @@ const READ_TIMEOUT_SECS: u64 = 60;
 /// Sent as: Int32(8) | Int32(80877103)
 const SSL_REQUEST_CODE: i32 = 80877103;
 
+// ── CopyData sub-types (first byte of payload inside CopyData) ──────────
+
+/// XLogData sub-type (w): WAL data from the server.
+const SUBTYPE_XLOG_DATA: u8 = b'w';
+/// Keepalive sub-type (k): primary keepalive message.
+const SUBTYPE_KEEPALIVE: u8 = b'k';
+/// StandbyStatusUpdate sub-type (r): client → server or echo.
+const SUBTYPE_STANDBY_STATUS_UPDATE: u8 = b'r';
+
+// ── Wire-protocol message types ────────────────────────────────────────
+
+const TYPE_COPY_DATA: u8 = b'd';
+const TYPE_COPY_DONE: u8 = b'c';
+const TYPE_ERROR_RESPONSE: u8 = b'E';
+const TYPE_AUTHENTICATION: u8 = b'R';
+const TYPE_READY_FOR_QUERY: u8 = b'Z';
+const TYPE_NOTICE_RESPONSE: u8 = b'N';
+const TYPE_BACKEND_KEY_DATA: u8 = b'K';
+const TYPE_QUERY: u8 = b'Q';
+const TYPE_PASSWORD_MESSAGE: u8 = b'p';
+const TYPE_COPY_BOTH_RESPONSE: u8 = b'W';
+const TYPE_SSL_ACCEPTED: u8 = b'S';
+
+// ── Wire-header sizes ──────────────────────────────────────────────────
+
+/// Size of the XLogData frame header:
+///   Byte1 'w' | Int64 start_lsn | Int64 end_lsn | Int64 timestamp
+/// = 1 + 8 + 8 + 8 = 25 bytes.
+const XLOG_DATA_HEADER_SIZE: usize = 25;
+
+/// Minimum size of a Keepalive frame header:
+///   Byte1 'k' | Int64 end_lsn | Int64 timestamp | Byte1 reply_required
+/// = 1 + 8 + 8 + 1 = 18 bytes.
+const KEEPALIVE_HEADER_SIZE: usize = 18;
+
+/// Size of an Int32 on the wire.
+const INT32_SIZE: usize = 4;
+
+/// Size of an Int64 on the wire.
+const INT64_SIZE: usize = 8;
+
+/// Size of an Int16 on the wire.
+const INT16_SIZE: usize = 2;
+
 // ---------------------------------------------------------------------------
 // MaybeTls — unified AsyncRead + AsyncWrite for plain / TLS streams
 // ---------------------------------------------------------------------------
@@ -272,7 +316,7 @@ pub async fn start(
                 TapError::PostgresConnectionRedacted(format!("SSLRequest read failed: {e}"))
             })?;
 
-        if response[0] != b'S' {
+        if response[0] != TYPE_SSL_ACCEPTED {
             return Err(TapError::PostgresConnectionRedacted(format!(
                 "server rejected TLS connection (response byte: 0x{:02x})",
                 response[0]
@@ -404,13 +448,18 @@ async fn send_startup(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
 async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<(), TapError> {
     loop {
         let msg_type = read_u8(stream).await?;
-        if msg_type != b'R' {
+        if msg_type != TYPE_AUTHENTICATION {
             return Err(proto_err(format!(
                 "expected Authentication message ('R'), got 0x{msg_type:02x}"
             )));
         }
 
         let _len = read_i32(stream).await?; // includes self + type
+        if _len < 8 {
+            return Err(proto_err(format!(
+                "Authentication message too short: {_len} bytes (need at least 8)"
+            )));
+        }
         let auth_type = read_i32(stream).await?;
 
         match auth_type {
@@ -482,12 +531,17 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
 
                 // Read AuthenticationSASLContinue (type 11)
                 let msg_type = read_u8(stream).await?;
-                if msg_type != b'R' {
+                if msg_type != TYPE_AUTHENTICATION {
                     return Err(proto_err(format!(
                         "expected SASLContinue ('R'), got 0x{msg_type:02x}"
                     )));
                 }
                 let _len = read_i32(stream).await?;
+                if _len < 8 {
+                    return Err(proto_err(format!(
+                        "SASLContinue message too short: {_len} bytes (need at least 8)"
+                    )));
+                }
                 let sasl_type = read_i32(stream).await?;
                 if sasl_type != 11 {
                     return Err(proto_err(format!(
@@ -536,12 +590,17 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
 
                 // Read AuthenticationSASLFinal (type 12) or AuthenticationOk
                 let msg_type = read_u8(stream).await?;
-                if msg_type != b'R' {
+                if msg_type != TYPE_AUTHENTICATION {
                     return Err(proto_err(format!(
                         "expected SASLFinal/Ok ('R'), got 0x{msg_type:02x}"
                     )));
                 }
                 let _len = read_i32(stream).await?;
+                if _len < 8 {
+                    return Err(proto_err(format!(
+                        "SASLFinal message too short: {_len} bytes (need at least 8)"
+                    )));
+                }
                 let sasl_type = read_i32(stream).await?;
                 match sasl_type {
                     0 => {
@@ -601,7 +660,7 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
 /// Send a PasswordMessage ('p').
 async fn send_password_message(stream: &mut MaybeTls, password: &[u8]) -> Result<(), TapError> {
     let mut msg = Vec::new();
-    msg.push(b'p');
+    msg.push(TYPE_PASSWORD_MESSAGE);
     // Include null terminator in the password field
     let len = (password.len() + 1 + 4) as i32; // +4 for the length field itself
     msg.extend_from_slice(&len.to_be_bytes());
@@ -620,21 +679,26 @@ async fn read_ready_for_query(stream: &mut MaybeTls) -> Result<(), TapError> {
     loop {
         let msg_type = read_u8(stream).await?;
         match msg_type {
-            b'Z' => {
+            TYPE_READY_FOR_QUERY => {
                 let _len = read_i32(stream).await?;
+                if _len < 5 {
+                    return Err(proto_err(format!(
+                        "ReadyForQuery message too short: {_len} bytes (need at least 5)"
+                    )));
+                }
                 let _status = read_u8(stream).await?; // 'I', 'T', or 'E'
                 return Ok(());
             }
-            b'E' => {
+            TYPE_ERROR_RESPONSE => {
                 let error_msg = read_error_response(stream).await?;
                 return Err(TapError::PostgresConnectionRedacted(error_msg));
             }
-            b'N' => {
+            TYPE_NOTICE_RESPONSE => {
                 // NoticeResponse — skip
                 let len = read_i32(stream).await?;
                 skip_bytes(stream, (len - 4) as usize).await?;
             }
-            b'K' => {
+            TYPE_BACKEND_KEY_DATA => {
                 // BackendKeyData — skip
                 let len = read_i32(stream).await?;
                 skip_bytes(stream, (len - 4) as usize).await?;
@@ -653,7 +717,7 @@ async fn read_ready_for_query(stream: &mut MaybeTls) -> Result<(), TapError> {
 /// Send a Query ('Q') message.
 async fn send_query(stream: &mut MaybeTls, query: &str) -> Result<(), TapError> {
     let mut msg = Vec::new();
-    msg.push(b'Q');
+    msg.push(TYPE_QUERY);
     let len = (query.len() + 1 + 4) as i32; // +4 for length field, +1 for \0
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(query.as_bytes());
@@ -667,7 +731,7 @@ async fn send_query(stream: &mut MaybeTls, query: &str) -> Result<(), TapError> 
 async fn read_copy_both_response(stream: &mut MaybeTls) -> Result<(), TapError> {
     let msg_type = read_u8(stream).await?;
     match msg_type {
-        b'W' => {
+        TYPE_COPY_BOTH_RESPONSE => {
             let len = read_i32(stream).await?;
             // CopyBothResponse: Int8 overall_format, Int16 num_cols,
             // Int16 format_codes[num_cols]
@@ -675,7 +739,7 @@ async fn read_copy_both_response(stream: &mut MaybeTls) -> Result<(), TapError> 
             debug!("received CopyBothResponse");
             Ok(())
         }
-        b'E' => {
+        TYPE_ERROR_RESPONSE => {
             let error_msg = read_error_response(stream).await?;
             Err(TapError::PostgresConnectionRedacted(format!(
                 "START_REPLICATION rejected: {error_msg}"
@@ -731,16 +795,26 @@ async fn reader_task(
         };
 
         match msg_type {
-            b'd' => {
+            TYPE_COPY_DATA => {
                 // CopyData
-                let len = match read_i32(&mut stream).await {
-                    Ok(l) => l as usize,
+                let raw_len = match read_i32(&mut stream).await {
+                    Ok(l) => {
+                        if l < 4 {
+                            let _ = tx
+                                .send(Err(TapError::Decode(format!(
+                                    "negative CopyData length: {l}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                        l as usize
+                    }
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
                 };
-                let payload_len = len.saturating_sub(4);
+                let payload_len = raw_len - 4;
                 if payload_len > MAX_MESSAGE_SIZE {
                     let _ = tx
                         .send(Err(TapError::Decode(format!(
@@ -765,10 +839,10 @@ async fn reader_task(
 
                 let sub_type = payload[0];
                 match sub_type {
-                    b'w' => {
+                    SUBTYPE_XLOG_DATA => {
                         // XLogData: Byte1 'w' | Int64 start_lsn | Int64 end_lsn
                         //           | Int64 timestamp | Byte[n] data
-                        if payload.len() < 25 {
+                        if payload.len() < XLOG_DATA_HEADER_SIZE {
                             let _ = tx
                                 .send(Err(TapError::Decode(format!(
                                     "truncated XLogData: {} bytes",
@@ -777,31 +851,38 @@ async fn reader_task(
                                 .await;
                             return;
                         }
-                        let _start_lsn = i64::from_be_bytes(payload[1..9].try_into().unwrap());
-                        let end_lsn = i64::from_be_bytes(payload[9..17].try_into().unwrap());
-                        let _timestamp = i64::from_be_bytes(payload[17..25].try_into().unwrap());
+                        // SAFETY: payload.len() >= 25 is checked above
+                        let start_lsn_arr: [u8; 8] = payload[1..9].try_into().expect("XLogData size validated");
+                        let end_lsn_arr: [u8; 8] = payload[9..17].try_into().expect("XLogData size validated");
+                        let ts_arr: [u8; 8] = payload[17..XLOG_DATA_HEADER_SIZE].try_into().expect("XLogData size validated");
+                        let _start_lsn = i64::from_be_bytes(start_lsn_arr);
+                        let end_lsn = i64::from_be_bytes(end_lsn_arr);
+                        let _timestamp = i64::from_be_bytes(ts_arr);
 
                         last_received_lsn = end_lsn;
                         current_lsn.store(end_lsn, Ordering::Release);
 
-                        // Yield the actual WAL data (after the 25-byte header)
-                        let wal_data = payload[25..].to_vec();
+                        // Yield the actual WAL data (after the XLogData header)
+                        let wal_data = payload[XLOG_DATA_HEADER_SIZE..].to_vec();
                         if !wal_data.is_empty() && tx.send(Ok(wal_data)).await.is_err() {
                             // Receiver dropped
                             return;
                         }
                         // Even if empty, the stream is alive
                     }
-                    b'k' => {
+                    SUBTYPE_KEEPALIVE => {
                         // Keepalive: Byte1 'k' | Int64 end_lsn | Int64 ts
                         //            | Byte1 reply_required
-                        if payload.len() < 18 {
+                        if payload.len() < KEEPALIVE_HEADER_SIZE {
                             debug!("truncated Keepalive message, skipping");
                             continue;
                         }
-                        let wal_end = i64::from_be_bytes(payload[1..9].try_into().unwrap());
-                        let _ts = i64::from_be_bytes(payload[9..17].try_into().unwrap());
-                        let reply_required = payload.len() >= 18 && payload[17] != 0;
+                        // SAFETY: payload.len() >= 18 is checked above
+                        let wal_end_arr: [u8; 8] = payload[1..9].try_into().expect("Keepalive size validated");
+                        let _ts_arr: [u8; 8] = payload[9..17].try_into().expect("Keepalive size validated");
+                        let wal_end = i64::from_be_bytes(wal_end_arr);
+                        let _ts = i64::from_be_bytes(_ts_arr);
+                        let reply_required = payload.len() >= KEEPALIVE_HEADER_SIZE && payload[17] != 0;
 
                         last_flushed_lsn = last_flushed_lsn.max(wal_end);
                         last_received_lsn = last_received_lsn.max(wal_end);
@@ -827,7 +908,7 @@ async fn reader_task(
                         // to observe progress
                         let _ = tx.send(Ok(Vec::new())).await;
                     }
-                    b'r' => {
+                    SUBTYPE_STANDBY_STATUS_UPDATE => {
                         // StandbyStatusUpdate (echoed back by server) — skip
                         debug!("received standby status update echo");
                     }
@@ -839,14 +920,14 @@ async fn reader_task(
                     }
                 }
             }
-            b'c' => {
+            TYPE_COPY_DONE => {
                 // CopyDone — server is done sending
                 info!("server sent CopyDone, replication stream ending");
                 return;
             }
-            b'E' => {
+            TYPE_ERROR_RESPONSE => {
                 // ErrorResponse
-                let error_msg = match read_error_response_raw(&mut stream).await {
+                let error_msg = match read_error_response(&mut stream).await {
                     Ok(m) => m,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
@@ -861,18 +942,23 @@ async fn reader_task(
             other => {
                 debug!("unknown message type 0x{other:02x} in replication stream, skipping");
                 let len = match read_i32(&mut stream).await {
-                    Ok(l) => l as usize,
+                    Ok(l) => {
+                        if l < 4 {
+                            let _ = tx
+                                .send(Err(TapError::Decode(format!(
+                                    "negative message length: {l}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                        l as usize
+                    }
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
                 };
-                if len > 4 {
-                    if let Err(e) = skip_bytes(&mut stream, len - 4).await {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                }
+                skip_bytes(&mut stream, len.saturating_sub(4)).await;
             }
         }
 
@@ -910,7 +996,7 @@ async fn send_standby_status_update(
     // Byte1 'r' | Int64 received_lsn | Int64 flushed_lsn | Int64 applied_lsn
     // | Int64 timestamp | Byte1 reply_requested
     let mut payload = Vec::with_capacity(34);
-    payload.push(b'r');
+    payload.push(SUBTYPE_STANDBY_STATUS_UPDATE);
     payload.extend_from_slice(&received_lsn.to_be_bytes());
     payload.extend_from_slice(&flushed_lsn.to_be_bytes());
     payload.extend_from_slice(&applied_lsn.to_be_bytes());
@@ -920,7 +1006,7 @@ async fn send_standby_status_update(
     payload.push(0); // don't request a reply
 
     let mut msg = Vec::with_capacity(payload.len() + 5);
-    msg.push(b'd'); // CopyData
+    msg.push(TYPE_COPY_DATA); // CopyData
     msg.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
     msg.extend_from_slice(&payload);
 
@@ -972,11 +1058,6 @@ async fn read_error_response(stream: &mut MaybeTls) -> Result<String, TapError> 
     let mut payload = vec![0u8; payload_len];
     stream.read_exact(&mut payload).await.map_err(wrap_io_err)?;
     Ok(extract_error_message(&payload))
-}
-
-/// Read an ErrorResponse message and return raw payload for custom parsing.
-async fn read_error_response_raw(stream: &mut MaybeTls) -> Result<String, TapError> {
-    read_error_response(stream).await
 }
 
 /// Extract the human-readable message from an ErrorResponse payload
@@ -1044,22 +1125,19 @@ fn generate_nonce() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .expect("SystemTime before UNIX_EPOCH")
         .as_nanos();
-    // Mix timestamp with a simple pseudo-random value
-    format!("{:016x}{:08x}", ts, rand_compat())
+    // Mix timestamp with PID to seed a SplitMix32 PRNG
+    let pid = std::process::id();
+    let seed = (ts ^ pid as u128) as u64;
+    format!("{:016x}{:08x}", ts, splitmix32(seed))
 }
 
-/// Simple non-cryptographic randomness for the nonce (enough for SCRAM).
-fn rand_compat() -> u32 {
-    // Use a basic LCG seeded with time + PID
-    let pid = std::process::id();
-    let seed = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        ^ pid as u128) as u64;
-    // SplitMix64 style
+/// SplitMix32 pseudo-random number generator (enough for SCRAM nonces).
+///
+/// Takes an explicit seed (caller should provide a unique value per
+/// invocation such as a timestamp XORed with PID) and returns a u32.
+fn splitmix32(seed: u64) -> u32 {
     let mut z = seed.wrapping_add(0x9e3779b97f4a7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
@@ -1187,7 +1265,7 @@ fn hex_encode(data: &[u8]) -> String {
 /// Unlike SASLInitialResponse, there is **no** extra inner-length prefix.
 fn build_sasl_response(client_final: &[u8]) -> Vec<u8> {
     let mut resp = Vec::with_capacity(1 + 4 + client_final.len());
-    resp.push(b'p');
+    resp.push(TYPE_PASSWORD_MESSAGE);
     let len = (client_final.len() + 4) as i32;
     resp.extend_from_slice(&len.to_be_bytes());
     resp.extend_from_slice(client_final);
