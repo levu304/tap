@@ -66,7 +66,12 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+### CI Quality Gates
+- **Always run `cargo fmt --all` after any code change** — especially after clippy fixes.
+  Clippy can change expression structure (e.g., removing `return` from a tail expression
+  in a match arm), which `cargo fmt` will re-flow. The order is: fix code → `cargo fmt`
+  → verify with `cargo clippy --workspace -- --deny warnings`. Failing to fmt after a
+  clippy fix will cause a CI Format failure on the next run.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
