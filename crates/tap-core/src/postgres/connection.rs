@@ -248,7 +248,7 @@ impl PgConnection {
         let rows = self
             .client
             .query(
-                "SELECT slot_name, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = $1",
+                "SELECT slot_name, confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
                 &[slot_name],
             )
             .await?;
