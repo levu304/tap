@@ -681,7 +681,7 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
                                 &mut stream,
                                 last_received_lsn,
                                 last_flushed_lsn,
-                                false,
+                                last_received_lsn,
                             )
                             .await
                             {
@@ -749,7 +749,7 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
             >= tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
         {
             if let Err(e) =
-                send_standby_status_update(&mut stream, last_received_lsn, last_flushed_lsn, false)
+                send_standby_status_update(&mut stream, last_received_lsn, last_flushed_lsn, last_received_lsn)
                     .await
             {
                 let _ = tx.send(Err(e)).await;
@@ -761,24 +761,23 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
 }
 
 /// Send a StandbyStatusUpdate ('r') message to the server via CopyData.
+///
+/// The `applied_lsn` field tells the server how much WAL the consumer has
+/// processed — typically `received_lsn` (ack what we've received) or a
+/// separately tracked position if the consumer is running behind.
 async fn send_standby_status_update(
     stream: &mut MaybeTls,
     received_lsn: i64,
     flushed_lsn: i64,
-    applied_lsn: bool,
+    applied_lsn: i64,
 ) -> Result<(), TapError> {
-    let lsn_val = if applied_lsn {
-        flushed_lsn
-    } else {
-        received_lsn
-    };
     // Byte1 'r' | Int64 received_lsn | Int64 flushed_lsn | Int64 applied_lsn
     // | Int64 timestamp | Byte1 reply_requested
     let mut payload = Vec::with_capacity(34);
     payload.push(b'r');
     payload.extend_from_slice(&received_lsn.to_be_bytes());
     payload.extend_from_slice(&flushed_lsn.to_be_bytes());
-    payload.extend_from_slice(&lsn_val.to_be_bytes());
+    payload.extend_from_slice(&applied_lsn.to_be_bytes());
 
     // Client timestamp (microseconds since 2000-01-01) — just use 0 for now
     payload.extend_from_slice(&0i64.to_be_bytes());
