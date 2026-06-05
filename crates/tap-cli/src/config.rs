@@ -39,7 +39,7 @@ pub fn config_from_init_args(args: &InitArgs) -> TapConfig {
             publication: args.publication.clone(),
             tables: args.tables.clone(),
             plugin: args.plugin.clone(),
-            ssl_mode: SslMode::Require,
+            ssl_mode: SslMode::Disable,
         },
         sink: SinkConfig::default(),
         capture: CaptureConfig::default(),
