@@ -96,6 +96,25 @@ pub struct ColumnInfo {
 }
 
 // ---------------------------------------------------------------------------
+// DecodeResult
+// ---------------------------------------------------------------------------
+
+/// Result from a single [`WalDecoder::decode()`] call.
+#[derive(Debug)]
+pub struct DecodeResult {
+    /// Decoded change events (non-empty when a transaction was committed).
+    pub events: Vec<ChangeEvent>,
+    /// Commit LSN extracted from the decoded data, if available.
+    ///
+    /// * `pgoutput` — the commit LSN from the `Commit` message.
+    /// * `wal2json` — `None` (wal2json does not include LSNs in its JSON).
+    ///
+    /// When `None`, the caller should fall back to the replication stream's
+    /// current position (e.g. [`ReplicationStream::current_lsn`]).
+    pub commit_lsn: Option<PgLsn>,
+}
+
+// ---------------------------------------------------------------------------
 // WalDecoder trait
 // ---------------------------------------------------------------------------
 
@@ -110,19 +129,22 @@ pub struct ColumnInfo {
 /// across tasks if needed.  The trait takes `&mut self` to allow stateful
 /// streaming.
 pub trait WalDecoder: Send + Sync {
-    /// Decode a single WAL message (or batch) into zero or more change events.
+    /// Decode a single WAL message (or batch) into decoded events and an
+    /// optional commit LSN.
     ///
     /// * For **pgoutput** the buffer may contain multiple concatenated
     ///   protocol messages.  Begin / Relation / Insert / Update / Delete
     ///   messages are accumulated; Commit messages finalise pending events.
-    ///   The returned vector is non-empty only when a Commit is processed.
+    ///   The returned events vector is non-empty only when a Commit is
+    ///   processed, and `commit_lsn` is set to the Commit's LSN.
     /// * For **wal2json** each call receives one complete JSON transaction
-    ///   blob and returns all change rows as events.
+    ///   blob and returns all change rows as events.  `commit_lsn` is `None`
+    ///   because wal2json does not carry per-event LSNs.
     ///
     /// # Errors
     ///
     /// Returns [`TapError::Decode`] for malformed or corrupt input.
-    fn decode(&mut self, message: &[u8]) -> Result<Vec<ChangeEvent>, TapError>;
+    fn decode(&mut self, message: &[u8]) -> Result<DecodeResult, TapError>;
 
     /// Human-readable decoder name (e.g. `"pgoutput"`, `"wal2json"`).
     fn name(&self) -> &'static str;
@@ -166,6 +188,8 @@ pub struct PgoutputDecoder {
     current_ts_ms: Option<u64>,
     /// Events accumulated for the current transaction.
     pending_events: Vec<PendingEvent>,
+    /// LSN from the last committed transaction, returned via [`DecodeResult`].
+    last_commit_lsn: Option<PgLsn>,
 }
 
 /// An event that has been partially decoded and is waiting for a Commit
@@ -192,6 +216,7 @@ impl PgoutputDecoder {
             current_tx_id: None,
             current_ts_ms: None,
             pending_events: Vec::new(),
+            last_commit_lsn: None,
         }
     }
 
@@ -395,6 +420,7 @@ impl PgoutputDecoder {
     ) -> Result<Vec<ChangeEvent>, TapError> {
         let _flags = read_i64(buf, offset)?;
         let commit_lsn = PgLsn::from_u64(read_i64(buf, offset)? as u64);
+        self.last_commit_lsn = Some(commit_lsn);
         let _end_lsn = read_i64(buf, offset)?;
         let ts_us = read_i64(buf, offset)?;
 
@@ -614,9 +640,11 @@ impl Default for PgoutputDecoder {
 }
 
 impl WalDecoder for PgoutputDecoder {
-    fn decode(&mut self, message: &[u8]) -> Result<Vec<ChangeEvent>, TapError> {
+    fn decode(&mut self, message: &[u8]) -> Result<DecodeResult, TapError> {
         let mut offset = 0usize;
-        self.decode_messages(message, &mut offset)
+        let events = self.decode_messages(message, &mut offset)?;
+        let commit_lsn = self.last_commit_lsn.take();
+        Ok(DecodeResult { events, commit_lsn })
     }
 
     fn name(&self) -> &'static str {
@@ -688,7 +716,7 @@ impl Wal2JsonDecoder {
 }
 
 impl WalDecoder for Wal2JsonDecoder {
-    fn decode(&mut self, message: &[u8]) -> Result<Vec<ChangeEvent>, TapError> {
+    fn decode(&mut self, message: &[u8]) -> Result<DecodeResult, TapError> {
         let text = std::str::from_utf8(message)
             .map_err(|e| TapError::Decode(format!("wal2json input is not valid UTF-8: {e}")))?;
 
@@ -791,7 +819,11 @@ impl WalDecoder for Wal2JsonDecoder {
             });
         }
 
-        Ok(events)
+        // wal2json does not carry per-event LSNs, so commit_lsn is always None.
+        Ok(DecodeResult {
+            events,
+            commit_lsn: None,
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -1299,7 +1331,7 @@ mod tests {
             0x16B37429u64,
         );
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
 
         // Wait: Begin + Relation + Insert + Commit = 4 messages.
         // But commit should flush events after processing all messages.
@@ -1346,7 +1378,7 @@ mod tests {
             0x200,
         );
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1382,7 +1414,7 @@ mod tests {
             0x400,
         );
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1410,7 +1442,7 @@ mod tests {
             0x600,
         );
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1434,7 +1466,7 @@ mod tests {
         msg.extend_from_slice(&build_insert(5, &[(b"123", false)]));
         msg.extend_from_slice(&build_commit(0, 0x20, 0x20, 100_000i64));
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].source.table, "cache_test");
         assert_eq!(events[0].source.schema, "public");
@@ -1466,7 +1498,7 @@ mod tests {
         let result = decoder2.decode(&[0xFF, 0x01, 0x02]);
         // Unknown type simply returns empty vec
         assert!(result.is_ok(), "unknown type should not panic");
-        assert!(result.unwrap().is_empty());
+        assert!(result.unwrap().events.is_empty());
     }
 
     // ── Test: Unknown type byte is skipped ───────────────────────────
@@ -1489,7 +1521,7 @@ mod tests {
             0x20,
         ));
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1, "still decoded after skipping Type message");
     }
 
@@ -1522,7 +1554,7 @@ mod tests {
             0x60,
         );
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 4, "all 4 DMLs should produce events");
 
         assert_eq!(events[0].op, Operation::Create);
@@ -1611,7 +1643,7 @@ mod tests {
         msg.extend_from_slice(&insert);
         msg.extend_from_slice(&commit);
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let after = events[0].after.as_ref().unwrap();
@@ -1639,7 +1671,7 @@ mod tests {
             }]
         }"#;
 
-        let events = decoder.decode(json.as_bytes()).unwrap();
+        let events = decoder.decode(json.as_bytes()).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1679,7 +1711,7 @@ mod tests {
             }]
         }"#;
 
-        let events = decoder.decode(json.as_bytes()).unwrap();
+        let events = decoder.decode(json.as_bytes()).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1720,7 +1752,7 @@ mod tests {
             }]
         }"#;
 
-        let events = decoder.decode(json.as_bytes()).unwrap();
+        let events = decoder.decode(json.as_bytes()).unwrap().events;
         assert_eq!(events.len(), 1);
 
         let ev = &events[0];
@@ -1755,8 +1787,8 @@ mod tests {
     #[test]
     fn test_decode_empty_buffer() {
         let mut decoder = PgoutputDecoder::new("");
-        let events = decoder.decode(b"").unwrap();
-        assert!(events.is_empty());
+        let result = decoder.decode(b"").unwrap();
+        assert!(result.events.is_empty());
     }
 
     // ── Test: Schema cache persists across calls ─────────────────────
@@ -1768,7 +1800,7 @@ mod tests {
         // Send relation in first call
         let rel = build_relation(99, "public", "persist_test", &[("x", 23, -1)]);
         let result = decoder.decode(&rel).unwrap();
-        assert!(result.is_empty(), "relation produces no events");
+        assert!(result.events.is_empty(), "relation produces no events");
 
         // Send txn referencing it in second call
         let msg = build_transaction(
@@ -1779,7 +1811,7 @@ mod tests {
             vec![build_insert(99, &[(b"999", false)])],
             0x20,
         );
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].source.table, "persist_test");
     }
@@ -1791,8 +1823,8 @@ mod tests {
         let mut decoder = PgoutputDecoder::new("");
 
         let rel = build_relation(42, "public", "just_schema", &[("a", 25, -1)]);
-        let events = decoder.decode(&rel).unwrap();
-        assert!(events.is_empty());
+        let result = decoder.decode(&rel).unwrap();
+        assert!(result.events.is_empty());
     }
 
     // ── Test: DML without prior relation returns error ───────────────
@@ -1836,7 +1868,7 @@ mod tests {
             ]
         }"#;
 
-        let events = decoder.decode(json.as_bytes()).unwrap();
+        let events = decoder.decode(json.as_bytes()).unwrap().events;
         assert_eq!(events.len(), 1, "unknown change kind should be skipped");
         assert_eq!(events[0].op, Operation::Create);
     }
@@ -1944,7 +1976,7 @@ mod tests {
             0x20,
         ));
 
-        let events = decoder.decode(&msg).unwrap();
+        let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1, "skipped Truncate + Origin, decoded txn");
     }
 

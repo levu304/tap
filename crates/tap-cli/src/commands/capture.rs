@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Args;
+use futures::StreamExt;
 use tap_core::error::TapError;
 use tap_core::event::ChangeEvent;
+use tap_core::postgres::create_decoder;
 use tap_core::postgres::{Lsn, PgConnection, connect_plain};
 use tap_core::snapshot::SnapshotRunner;
 use tap_core::sse::{SseEvent, SseEventType, SseServer};
@@ -235,7 +237,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         }
     }
 
-    // ── 9. Start replication stream (stub in v0.1.0) ────────────────
+    // ── 9. Start replication stream ──────────────────────────────────
     debug_assert!(
         start_lsn.is_some() || !config.capture.snapshot,
         "snapshot ran but start_lsn is still None"
@@ -245,7 +247,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         Lsn::ZERO
     });
     info!("Starting replication from LSN {replication_start}");
-    let _replication_stream = pg
+    let mut replication_stream = pg
         .start_replication(
             &config.source.slot_name,
             &config.source.publication,
@@ -258,6 +260,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         "Replication stream active (slot={})",
         config.source.slot_name
     );
+
+    // Create WAL decoder based on configured plugin
+    let mut decoder = create_decoder(&config.source.plugin, &config.source.dbname)
+        .map_err(|e| TapError::Decode(format!("Failed to create decoder: {e}")))?;
 
     // ── 10. Main event loop ──────────────────────────────────────────
     info!("Capture running — waiting for events (SSE on port {port})");
@@ -283,6 +289,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         }
         let _ = shutdown_tx.send(true);
     });
+
+    // Track the last successfully committed LSN for the final checkpoint.
+    // Updated on each successful write_offset call.
+    let mut last_committed_lsn: Option<Lsn> = None;
 
     loop {
         tokio::select! {
@@ -310,12 +320,114 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                 // Flush stdout manually (no newline)
                 let _ = std::io::stdout().flush();
             }
+
+            // Replication stream: consume WAL, decode, forward, checkpoint
+            result = replication_stream.next() => {
+                let wal_bytes = match result {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => {
+                        warn!("Replication stream error: {e}");
+                        break;
+                    }
+                    None => {
+                        warn!("Replication stream ended unexpectedly");
+                        break;
+                    }
+                };
+
+                let wal_len = wal_bytes.len();
+
+                match decoder.decode(&wal_bytes) {
+                    Ok(dr) => {
+                        let events = dr.events;
+                        if events.is_empty() {
+                            // Decoder accumulates data across calls;
+                            // only emits events on transaction commit
+                            continue;
+                        }
+
+                        let count = events.len() as u64;
+
+                        // Update health state
+                        {
+                            let mut health = sse.health_state().write().await;
+                            health.events_captured += count;
+                            if let Some(first) = events.first() {
+                                health.current_lsn = first.source.lsn.to_string();
+                            }
+                        }
+
+                        // Use commit_lsn from the decoder (pgoutput provides it;
+                        // wal2json returns None).  Fall back to the replication
+                        // stream's current position (end_lsn from XLogData).
+                        // Finally, try parsing from the event source metadata
+                        // for backward compatibility.
+                        let checkpoint_lsn: Option<Lsn> = dr.commit_lsn
+                            .or_else(|| replication_stream.current_lsn())
+                            .or_else(|| {
+                                events.first()
+                                    .and_then(|e| e.source.lsn.0.parse::<Lsn>().ok())
+                            });
+                        let checkpoint_tx = events.first()
+                            .map(|e| e.source.tx_id.clone());
+                        let checkpoint_ts = events.first()
+                            .map_or(0, |e| e.source.ts_ms);
+
+                        // Forward decoded events to the SSE bridge task
+                        for event in events {
+                            let _ = change_tx.send(event);
+                        }
+
+                        // Persist offset checkpoint
+                        if let (Some(lsn), Some(tx_id)) = (checkpoint_lsn, checkpoint_tx) {
+                            let store = state.lock().await;
+                            if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false) {
+                                warn!("Failed to persist offset checkpoint: {e}");
+                            } else {
+                                last_committed_lsn = Some(lsn);
+                            }
+                        } else {
+                            warn!(
+                                "Cannot persist checkpoint: no LSN available (plugin={})",
+                                decoder.name(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!("WAL decode error ({} bytes): {e}", wal_len);
+                        decoder.flush(); // Clear partial decoder state
+                        // Record skipped LSN so the same chunk is not retried
+                        // indefinitely on restart.
+                        if let Some(lsn) = replication_stream.current_lsn() {
+                            let store = state.lock().await;
+                            let _ = store.record_skipped_lsn(
+                                &lsn.to_string(),
+                                decoder.name(),
+                                &e.to_string(),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
     println!(); // newline after status line
 
-    // ── 11. Graceful shutdown ────────────────────────────────────────
+    // ── 11. Final checkpoint ─────────────────────────────────────────
+    // Write final checkpoint with is_final=true so that read_last_offset
+    // prefers this row (via the is_final=1 query, avoiding the sequence
+    // fallback) — clean shutdown is distinguishable from a crash.
+    if let Some(lsn) = last_committed_lsn {
+        let store = state.lock().await;
+        if let Err(e) = store.write_offset(&lsn, "0", 0, true) {
+            warn!("Failed to persist final checkpoint: {e}");
+        } else {
+            info!("Final checkpoint written at {lsn}");
+        }
+    }
+
+    // ── 12. Graceful shutdown ────────────────────────────────────────
     info!("Shutting down...");
 
     // Stop SSE server (sends Shutdown event)
