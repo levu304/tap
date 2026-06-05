@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod postgres;
+pub mod replication;
 pub mod snapshot;
 pub mod sse;
 pub mod state;

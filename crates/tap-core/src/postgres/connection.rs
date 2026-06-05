@@ -3,18 +3,12 @@
 //! Implements [`Lsn`] (Log Sequence Number), [`PgConnection`] (replication
 //! client wrapper), and [`ReplicationStream`] (WAL data stream).
 
-use std::{
-    fmt,
-    pin::Pin,
-    str::FromStr,
-    task::{Context, Poll},
-};
+use std::{fmt, str::FromStr};
 
-use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{config::SourceConfig, error::TapError};
+use crate::{config::SourceConfig, error::TapError, replication::ReplicationStream};
 
 // ---------------------------------------------------------------------------
 // Lsn — Log Sequence Number
@@ -376,27 +370,18 @@ impl PgConnection {
 
     /// Start a logical replication stream.
     ///
-    /// # Current Limitations
+    /// Delegates to [`crate::replication::start`] which opens a raw TCP/TLS
+    /// connection and implements the PostgreSQL `COPY_BOTH` wire protocol
+    /// for logical replication.
     ///
-    /// The current version of `tokio-postgres` (0.7) does not expose the
-    /// Postgres `COPY BOTH` protocol needed to execute
-    /// `START_REPLICATION`.  Once the dependency is upgraded (tokio-postgres
-    /// 0.8+ or equivalent), this method will issue:
-    ///
-    /// ```text
-    /// START_REPLICATION SLOT "{slot_name}" LOGICAL {start_lsn}
-    ///   (plugin "{plugin}", publication "{publication}")
-    /// ```
-    ///
-    /// via `client.copy_both_simple()` and wrap the resulting stream.
-    ///
-    /// For now, this returns a channel-backed [`ReplicationStream`] that
-    /// yields no data, allowing the connection lifecycle to be exercised
-    /// in isolation.
+    /// The returned [`ReplicationStream`] yields raw WAL payload bytes
+    /// (with XLogData headers stripped) via a channel-backed stream.
     ///
     /// # Errors
     ///
-    /// Returns [`TapError::Config`] if the slot name fails validation.
+    /// Returns [`TapError::Config`] if the slot name fails validation, or
+    /// [`TapError::Io`] / [`TapError::PostgresConnectionRedacted`] for
+    /// connection, auth, or protocol issues.
     pub async fn start_replication(
         &self,
         slot_name: &str,
@@ -404,23 +389,7 @@ impl PgConnection {
         start_lsn: Lsn,
         plugin: &str,
     ) -> Result<ReplicationStream, TapError> {
-        let _lsn_str = start_lsn.to_string();
-        let _publication = publication.to_string();
-        let _plugin = plugin.to_string();
-
-        // Validate slot name: alphanumeric + underscore only
-        crate::config::validate_identifier(slot_name, "slot_name")?;
-
-        info!(
-            "start_replication called (slot={slot_name}, publication={_publication}, \
-             lsn={start_lsn}, plugin={_plugin}) — implementation stubbed, \
-             requires tokio-postgres copy_both support"
-        );
-
-        // Return an empty stream for now.
-        // TODO(P9): Replace with actual copy_both implementation.
-        let (_tx, rx) = tokio::sync::mpsc::channel(1024);
-        Ok(ReplicationStream::from_receiver(rx))
+        crate::replication::start(&self.config, slot_name, publication, start_lsn, plugin).await
     }
 
     /// Close the connection gracefully.
@@ -522,40 +491,6 @@ pub async fn connect_plain(
     };
 
     Ok((client, join_handle))
-}
-
-// ---------------------------------------------------------------------------
-// ReplicationStream
-// ---------------------------------------------------------------------------
-
-/// A stream of raw WAL data from a Postgres logical replication connection.
-///
-/// Wraps a channel-based stream.  In the current version (which uses
-/// tokio-postgres 0.7), this is backed by an mpsc channel.  When
-/// `tokio-postgres` gains `copy_both` support, the backing will be swapped
-/// to the real replication protocol, and the XLogData message framing will
-/// be stripped (25-byte header: 1 byte msg_type, 8 bytes start_lsn, 8 bytes
-/// end_lsn, 8 bytes timestamp).
-pub struct ReplicationStream {
-    rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, TapError>>,
-}
-
-impl ReplicationStream {
-    /// Create a new `ReplicationStream` from an mpsc receiver.
-    ///
-    /// Used internally and for testing to inject WAL data without a real
-    /// Postgres connection.
-    pub fn from_receiver(rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, TapError>>) -> Self {
-        Self { rx }
-    }
-}
-
-impl Stream for ReplicationStream {
-    type Item = Result<Vec<u8>, TapError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -755,44 +690,6 @@ mod tests {
     fn test_empty_identifier_fails() {
         let err = crate::config::validate_identifier("", "field").unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
-    }
-
-    // ── ReplicationStream ────────────────────────────────────────────────
-
-    #[test]
-    fn test_replication_stream_poll_ready() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, rx) = tokio::sync::mpsc::channel(16);
-            let mut stream = ReplicationStream::from_receiver(rx);
-
-            tx.send(Ok(vec![1, 2, 3])).await.unwrap();
-            tx.send(Ok(vec![4, 5, 6])).await.unwrap();
-
-            use futures::StreamExt;
-            let item1 = stream.next().await;
-            assert!(item1.is_some());
-            assert_eq!(item1.unwrap().unwrap(), vec![1, 2, 3]);
-
-            let item2 = stream.next().await;
-            assert!(item2.is_some());
-            assert_eq!(item2.unwrap().unwrap(), vec![4, 5, 6]);
-        });
-    }
-
-    #[test]
-    fn test_replication_stream_closed_channel() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, TapError>>(16);
-            // Drop the sender immediately so the channel is closed
-            drop(tx);
-            let mut stream = ReplicationStream::from_receiver(rx);
-
-            use futures::StreamExt;
-            let item = stream.next().await;
-            assert!(item.is_none());
-        });
     }
 
     // ── Edge cases ──────────────────────────────────────────────────────

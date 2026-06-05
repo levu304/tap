@@ -247,8 +247,14 @@ impl SourceConfig {
         if self.dbname.is_empty() {
             errors.push("source.dbname is required".into());
         }
+        if self.dbname.contains('\0') {
+            errors.push("source.dbname must not contain null bytes".into());
+        }
         if self.user.is_empty() {
             errors.push("source.user is required".into());
+        }
+        if self.user.contains('\0') {
+            errors.push("source.user must not contain null bytes".into());
         }
         if self.password.is_empty() {
             errors.push("source.password is required".into());
@@ -667,6 +673,30 @@ level = "info"
             ..SourceConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_null_byte_in_user() {
+        let config = SourceConfig {
+            dbname: "d".into(),
+            user: "u\0options=-clog_statement=all".into(),
+            password: "p".into(),
+            ..SourceConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("null byte"));
+    }
+
+    #[test]
+    fn test_config_validation_null_byte_in_dbname() {
+        let config = SourceConfig {
+            dbname: "d\0extra".into(),
+            user: "u".into(),
+            password: "p".into(),
+            ..SourceConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("null byte"));
     }
 
     #[test]
