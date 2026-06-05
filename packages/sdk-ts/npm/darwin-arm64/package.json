@@ -1,6 +1,6 @@
 {
   "name": "tap-cdc-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "description": "Native binding for tap-cdc on macOS arm64 (v0.1.0 stub — see README)",
