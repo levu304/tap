@@ -163,20 +163,18 @@ pub async fn start(
     // 1. TCP connect
     let addr = format!("{}:{}", config.host, config.port);
     info!("connecting to {addr}");
-    let tcp = tokio::net::TcpStream::connect(&addr).await.map_err(|e| {
-        TapError::PostgresConnectionRedacted(format!("TCP connect failed: {e}"))
-    })?;
+    let tcp = tokio::net::TcpStream::connect(&addr)
+        .await
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("TCP connect failed: {e}")))?;
 
     // 2. TLS wrapper (if configured)
     let mut stream: MaybeTls = if config.ssl_mode == SslMode::Disable {
         MaybeTls::Plain(tcp)
     } else {
         info!("wrapping connection with TLS");
-        let native_connector = native_tls::TlsConnector::builder()
-            .build()
-            .map_err(|e| {
-                TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
-            })?;
+        let native_connector = native_tls::TlsConnector::builder().build().map_err(|e| {
+            TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
+        })?;
         let connector = tokio_native_tls::TlsConnector::from(native_connector);
         let tls = connector.connect(&config.host, tcp).await.map_err(|e| {
             TapError::PostgresConnectionRedacted(format!("TLS handshake failed: {e}"))
@@ -220,10 +218,7 @@ pub async fn start(
 ///
 /// The startup message uses a different framing from regular messages:
 /// Int32 length | Int32 protocol_version | key\0value\0...\0
-async fn send_startup(
-    stream: &mut MaybeTls,
-    config: &SourceConfig,
-) -> Result<(), TapError> {
+async fn send_startup(stream: &mut MaybeTls, config: &SourceConfig) -> Result<(), TapError> {
     let user_param = format!("user\0{}\0", config.user);
     let db_param = format!("database\0{}\0", config.dbname);
     let repl_param = "replication\0database\0".to_string();
@@ -256,10 +251,7 @@ async fn send_startup(
 /// | 3    | CleartextPassword            |
 /// | 5    | MD5Password                  |
 /// | 10   | SASL (SCRAM-SHA-256 / SCRAM-SHA-256-PLUS) |
-async fn authenticate(
-    stream: &mut MaybeTls,
-    config: &SourceConfig,
-) -> Result<(), TapError> {
+async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<(), TapError> {
     loop {
         let msg_type = read_u8(stream).await?;
         if msg_type != b'R' {
@@ -287,9 +279,8 @@ async fn authenticate(
                 debug!("auth: MD5 password requested");
                 let mut salt = [0u8; 4];
                 stream.read_exact(&mut salt).await.map_err(wrap_io_err)?;
-                let inner_digest = md5_digest(
-                    &[config.password.as_bytes(), config.user.as_bytes()].concat(),
-                );
+                let inner_digest =
+                    md5_digest(&[config.password.as_bytes(), config.user.as_bytes()].concat());
                 let mut combined = inner_digest.as_bytes().to_vec();
                 combined.extend_from_slice(&salt);
                 let hash = md5_digest(&combined);
@@ -363,17 +354,14 @@ async fn authenticate(
 
                 // Compute client-final
                 let client_final_without_proof = format!("c=biws,r={server_nonce}");
-                let auth_message = format!(
-                    "{client_first_bare},{server_first},{client_final_without_proof}"
-                );
+                let auth_message =
+                    format!("{client_first_bare},{server_first},{client_final_without_proof}");
 
                 let salted_password = hi(
                     password,
                     &base64::engine::general_purpose::STANDARD
                         .decode(&salt_b64)
-                        .map_err(|e| {
-                            TapError::Decode(format!("invalid SCRAM salt base64: {e}"))
-                        })?,
+                        .map_err(|e| TapError::Decode(format!("invalid SCRAM salt base64: {e}")))?,
                     iterations,
                 );
                 let client_key = hmac_sha256(&salted_password, b"Client Key");
@@ -383,8 +371,7 @@ async fn authenticate(
                 let client_proof_b64 =
                     base64::engine::general_purpose::STANDARD.encode(&client_proof);
 
-                let client_final =
-                    format!("{client_final_without_proof},p={client_proof_b64}");
+                let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
                 let client_final_bytes = client_final.as_bytes();
 
                 // Send SASLResponse (type 'p' with protocol payload)
@@ -438,10 +425,7 @@ async fn authenticate(
 }
 
 /// Send a PasswordMessage ('p').
-async fn send_password_message(
-    stream: &mut MaybeTls,
-    password: &[u8],
-) -> Result<(), TapError> {
+async fn send_password_message(stream: &mut MaybeTls, password: &[u8]) -> Result<(), TapError> {
     let mut msg = Vec::new();
     msg.push(b'p');
     // Include null terminator in the password field
@@ -482,7 +466,9 @@ async fn read_ready_for_query(stream: &mut MaybeTls) -> Result<(), TapError> {
                 skip_bytes(stream, (len - 4) as usize).await?;
             }
             other => {
-                debug!("skipping unexpected message type 0x{other:02x} (waiting for ReadyForQuery)");
+                debug!(
+                    "skipping unexpected message type 0x{other:02x} (waiting for ReadyForQuery)"
+                );
                 let len = read_i32(stream).await?;
                 skip_bytes(stream, (len - 4) as usize).await?;
             }
@@ -596,15 +582,9 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
                                 .await;
                             return;
                         }
-                        let _start_lsn = i64::from_be_bytes(
-                            payload[1..9].try_into().unwrap(),
-                        );
-                        let end_lsn = i64::from_be_bytes(
-                            payload[9..17].try_into().unwrap(),
-                        );
-                        let _timestamp = i64::from_be_bytes(
-                            payload[17..25].try_into().unwrap(),
-                        );
+                        let _start_lsn = i64::from_be_bytes(payload[1..9].try_into().unwrap());
+                        let end_lsn = i64::from_be_bytes(payload[9..17].try_into().unwrap());
+                        let _timestamp = i64::from_be_bytes(payload[17..25].try_into().unwrap());
 
                         last_received_lsn = end_lsn;
 
@@ -623,12 +603,8 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
                             debug!("truncated Keepalive message, skipping");
                             continue;
                         }
-                        let wal_end = i64::from_be_bytes(
-                            payload[1..9].try_into().unwrap(),
-                        );
-                        let _ts = i64::from_be_bytes(
-                            payload[9..17].try_into().unwrap(),
-                        );
+                        let wal_end = i64::from_be_bytes(payload[1..9].try_into().unwrap());
+                        let _ts = i64::from_be_bytes(payload[9..17].try_into().unwrap());
                         let reply_required = payload.len() >= 18 && payload[17] != 0;
 
                         last_flushed_lsn = wal_end;
@@ -707,13 +683,9 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
         if last_keepalive_time.elapsed()
             >= tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
         {
-            if let Err(e) = send_standby_status_update(
-                &mut stream,
-                last_received_lsn,
-                last_flushed_lsn,
-                false,
-            )
-            .await
+            if let Err(e) =
+                send_standby_status_update(&mut stream, last_received_lsn, last_flushed_lsn, false)
+                    .await
             {
                 let _ = tx.send(Err(e)).await;
                 return;
@@ -730,7 +702,11 @@ async fn send_standby_status_update(
     flushed_lsn: i64,
     applied_lsn: bool,
 ) -> Result<(), TapError> {
-    let lsn_val = if applied_lsn { flushed_lsn } else { received_lsn };
+    let lsn_val = if applied_lsn {
+        flushed_lsn
+    } else {
+        received_lsn
+    };
     // Byte1 'r' | Int64 received_lsn | Int64 flushed_lsn | Int64 applied_lsn
     // | Int64 timestamp | Byte1 reply_requested
     let mut payload = Vec::with_capacity(34);
@@ -780,9 +756,8 @@ async fn read_string_to_nul(stream: &mut MaybeTls) -> Result<String, TapError> {
         }
         bytes.push(b);
     }
-    String::from_utf8(bytes).map_err(|e| {
-        TapError::Decode(format!("invalid UTF-8 in wire message: {e}"))
-    })
+    String::from_utf8(bytes)
+        .map_err(|e| TapError::Decode(format!("invalid UTF-8 in wire message: {e}")))
 }
 
 /// Read an ErrorResponse ('E') message and return the human-readable message.
@@ -918,9 +893,10 @@ fn parse_scram_server_first(
         } else if let Some(val) = part.strip_prefix("s=") {
             salt = Some(val.to_string());
         } else if let Some(val) = part.strip_prefix("i=") {
-            iterations = Some(val.parse::<u32>().map_err(|e| {
-                TapError::Decode(format!("invalid SCRAM iteration count: {e}"))
-            })?);
+            iterations =
+                Some(val.parse::<u32>().map_err(|e| {
+                    TapError::Decode(format!("invalid SCRAM iteration count: {e}"))
+                })?);
         }
     }
 
@@ -939,8 +915,8 @@ fn parse_scram_server_first(
 
 /// Compute MD5 digest as a hex string.
 fn md5_digest(data: &[u8]) -> String {
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), data)
-        .expect("MD5 hash failed");
+    let digest =
+        openssl::hash::hash(openssl::hash::MessageDigest::md5(), data).expect("MD5 hash failed");
     hex_encode(&digest)
 }
 
@@ -954,9 +930,8 @@ fn sha256(data: &[u8]) -> Vec<u8> {
 /// Compute HMAC-SHA-256.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let key = openssl::pkey::PKey::hmac(key).expect("HMAC key creation failed");
-    let mut signer =
-        openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key)
-            .expect("HMAC signer creation failed");
+    let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key)
+        .expect("HMAC signer creation failed");
     signer.update(data).expect("HMAC update failed");
     signer.sign_to_vec().expect("HMAC sign failed")
 }
@@ -1070,20 +1045,16 @@ mod tests {
     #[test]
     fn test_md5_digest() {
         let result = md5_digest(b"hello");
-        assert_eq!(
-            result,
-            "5d41402abc4b2a76b9719d911017c592"
-        );
+        assert_eq!(result, "5d41402abc4b2a76b9719d911017c592");
     }
 
     #[test]
     fn test_sha256_known() {
         let result = sha256(b"hello");
         let expected = vec![
-            0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e,
-            0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2, 0x9e,
-            0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e,
-            0x73, 0x04, 0x33, 0x62, 0x93, 0x8b, 0x98, 0x24,
+            0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9,
+            0xe2, 0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62,
+            0x93, 0x8b, 0x98, 0x24,
         ];
         assert_eq!(result, expected);
     }
