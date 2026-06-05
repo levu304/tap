@@ -24,7 +24,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{SourceConfig, SslMode};
+use crate::config::{validate_identifier, SourceConfig, SslMode};
 use crate::error::TapError;
 use crate::postgres::Lsn;
 
@@ -160,6 +160,11 @@ pub async fn start(
          lsn={start_lsn}, plugin={plugin})"
     );
 
+    // Validate replication identifiers before any network I/O
+    validate_identifier(slot_name, "slot_name")?;
+    validate_identifier(publication, "publication")?;
+    validate_identifier(plugin, "plugin")?;
+
     // 1. TCP connect
     let addr = format!("{}:{}", config.host, config.port);
     info!("connecting to {addr}");
@@ -192,10 +197,14 @@ pub async fn start(
     read_ready_for_query(&mut stream).await?;
 
     // 6. Send START_REPLICATION
+    // pgoutput accepts: publication_names, binary, proto_version, messages,
+    // streaming, two_phase.  The plugin is bound at slot-creation time, not
+    // passed here.  For future plugin compatibility the caller provides a
+    // `plugin` parameter, but pgoutput uses `publication_names`.
     let lsn_str = start_lsn.to_string();
     let query = format!(
         "START_REPLICATION SLOT \"{slot_name}\" LOGICAL {lsn_str} \
-         (plugin '{plugin}', publication '{publication}')"
+         (publication_names '{publication}')"
     );
     send_query(&mut stream, &query).await?;
 
