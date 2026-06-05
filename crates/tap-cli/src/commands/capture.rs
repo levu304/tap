@@ -332,7 +332,8 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                 };
 
                 match decoder.decode(&wal_bytes) {
-                    Ok(events) => {
+                    Ok(dr) => {
+                        let events = dr.events;
                         if events.is_empty() {
                             // Decoder accumulates data across calls;
                             // only emits events on transaction commit
@@ -350,9 +351,17 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                             }
                         }
 
-                        // Extract checkpoint metadata from the first event
-                        let checkpoint_lsn: Option<Lsn> = events.first()
-                            .and_then(|e| e.source.lsn.0.parse::<Lsn>().ok());
+                        // Use commit_lsn from the decoder (pgoutput provides it;
+                        // wal2json returns None).  Fall back to the replication
+                        // stream's current position (end_lsn from XLogData).
+                        // Finally, try parsing from the event source metadata
+                        // for backward compatibility.
+                        let checkpoint_lsn: Option<Lsn> = dr.commit_lsn
+                            .or_else(|| replication_stream.current_lsn())
+                            .or_else(|| {
+                                events.first()
+                                    .and_then(|e| e.source.lsn.0.parse::<Lsn>().ok())
+                            });
                         let checkpoint_tx = events.first()
                             .map(|e| e.source.tx_id.clone());
                         let checkpoint_ts = events.first()
@@ -369,6 +378,11 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                             if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false) {
                                 warn!("Failed to persist offset checkpoint: {e}");
                             }
+                        } else {
+                            warn!(
+                                "Cannot persist checkpoint: no LSN available (plugin={})",
+                                decoder.name(),
+                            );
                         }
                     }
                     Err(e) => {

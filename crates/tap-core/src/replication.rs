@@ -16,6 +16,8 @@
 //!    auto-responds to `Keepalive` messages with `StandbyStatusUpdate`.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use base64::Engine;
@@ -136,6 +138,11 @@ pub struct ReplicationStream {
     /// orphaned tasks.  When the channel closes unexpectedly, the handle's
     /// `is_finished()` state is checked to detect possible panics.
     reader_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Last received WAL end position from XLogData frames, shared with the
+    /// background reader task.  Updated atomically so the consumer can call
+    /// [`current_lsn()`](Self::current_lsn) without message-passing delay.
+    /// Initialised to `-1` (no position received yet).
+    current_lsn: Arc<AtomicI64>,
 }
 
 impl ReplicationStream {
@@ -144,12 +151,27 @@ impl ReplicationStream {
         Self {
             rx,
             reader_handle: None,
+            current_lsn: Arc::new(AtomicI64::new(-1)),
         }
     }
 
-    /// Attach the reader task handle (called from [`start`]).
-    fn set_reader_handle(&mut self, handle: tokio::task::JoinHandle<()>) {
-        self.reader_handle = Some(handle);
+
+    // set_reader_handle was removed — the reader handle is now attached during
+    // construction in [`start()`].  Tests using [`from_receiver()`] will have
+    // `reader_handle = None`, which is correct for channel-only testing.
+
+    /// Return the most recent WAL end-position received from the server, if
+    /// any XLogData frames have been processed.
+    ///
+    /// This is the `end_lsn` field from the most recent XLogData message.
+    /// Returns `None` before the first XLogData frame is received.
+    pub fn current_lsn(&self) -> Option<Lsn> {
+        let val = self.current_lsn.load(Ordering::Acquire);
+        if val >= 0 {
+            Some(Lsn::from_u64(val as u64))
+        } else {
+            None
+        }
     }
 }
 
@@ -325,10 +347,11 @@ pub async fn start(
 
     // 8. Spawn background reader task
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let reader_handle = tokio::spawn(reader_task(stream, tx));
+    let current_lsn = Arc::new(AtomicI64::new(-1));
+    let reader_lsn = Arc::clone(&current_lsn);
+    let reader_handle = tokio::spawn(reader_task(stream, tx, reader_lsn));
 
-    let mut stream = ReplicationStream::from_receiver(rx);
-    stream.set_reader_handle(reader_handle);
+    let stream = ReplicationStream { rx, reader_handle: Some(reader_handle), current_lsn };
 
     info!("replication stream established");
     Ok(stream)
@@ -668,7 +691,14 @@ async fn read_copy_both_response(stream: &mut MaybeTls) -> Result<(), TapError> 
 /// Background task that reads CopyData messages from the wire, parses
 /// XLogData frames, auto-replies to Keepalive, and sends WAL payloads
 /// through the channel.
-async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapError>>) {
+///
+/// `current_lsn` is updated atomically on each XLogData frame so the stream
+/// consumer can query the latest WAL position without message-passing delay.
+async fn reader_task(
+    mut stream: MaybeTls,
+    tx: mpsc::Sender<Result<Vec<u8>, TapError>>,
+    current_lsn: Arc<AtomicI64>,
+) {
     let mut last_received_lsn: i64 = 0;
     let mut last_flushed_lsn: i64 = 0;
     let mut last_keepalive_time: tokio::time::Instant = tokio::time::Instant::now();
@@ -749,6 +779,7 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
                         let _timestamp = i64::from_be_bytes(payload[17..25].try_into().unwrap());
 
                         last_received_lsn = end_lsn;
+                        current_lsn.store(end_lsn, Ordering::Release);
 
                         // Yield the actual WAL data (after the 25-byte header)
                         let wal_data = payload[25..].to_vec();
@@ -771,6 +802,7 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
 
                         last_flushed_lsn = last_flushed_lsn.max(wal_end);
                         last_received_lsn = last_received_lsn.max(wal_end);
+                        current_lsn.store(last_received_lsn, Ordering::Release);
 
                         if reply_required {
                             debug!("sending standby status update (keepalive requested)");
@@ -1296,7 +1328,7 @@ mod tests {
         let stream = MaybeTls::Test(client);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         let wal_payload = b"WAL DATA PAYLOAD HERE";
         let msg = copy_data(&xlog_data(wal_payload));
@@ -1327,7 +1359,7 @@ mod tests {
         let stream = MaybeTls::Test(client);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         // Send a keepalive requesting a reply
         let msg = copy_data(&keepalive(42, true));
@@ -1531,7 +1563,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(65536);
         let stream = MaybeTls::Test(client);
         let (tx, rx) = mpsc::channel(16);
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         // Close both ends — reader read will fail and send to rx will fail
         drop(server);
@@ -1554,7 +1586,7 @@ mod tests {
         let stream = MaybeTls::Test(client);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         server.write_all(&copy_done()).await.unwrap();
 
@@ -1588,7 +1620,7 @@ mod tests {
         let stream = MaybeTls::Test(client);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         server
             .write_all(&error_response("test error"))
@@ -1621,7 +1653,7 @@ mod tests {
         let stream = MaybeTls::Test(client);
         let (tx, mut rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(reader_task(stream, tx));
+        let handle = tokio::spawn(reader_task(stream, tx, Arc::new(AtomicI64::new(-1))));
 
         let wal_data = b"CHUNKED WAL DATA 12345";
         let msg = copy_data(&xlog_data(wal_data));
