@@ -37,16 +37,16 @@ pub(crate) async fn send_startup(
 }
 
 /// Send a PasswordMessage ('p').
+///
+/// The password is sent with a trailing NUL terminator as required by the
+/// PostgreSQL wire protocol.
 pub(crate) async fn send_password_message(
     stream: &mut MaybeTls,
     password: &[u8],
 ) -> Result<(), TapError> {
-    let mut msg = Vec::new();
-    msg.push(TYPE_PASSWORD_MESSAGE);
-    let len = (password.len() + 1 + 4) as i32;
-    msg.extend_from_slice(&len.to_be_bytes());
-    msg.extend_from_slice(password);
-    msg.push(0);
+    let mut payload = password.to_vec();
+    payload.push(0);
+    let msg = build_message(TYPE_PASSWORD_MESSAGE, &payload);
     stream.write_all(&msg).await.map_err(wrap_io_err)?;
     stream.flush().await.map_err(wrap_io_err)?;
     Ok(())
@@ -70,8 +70,8 @@ pub(crate) async fn read_ready_for_query(
                 return Ok(());
             }
             TYPE_ERROR_RESPONSE => {
-                let error_msg = read_error_response(stream).await?;
-                return Err(TapError::PostgresConnectionRedacted(error_msg));
+                let error_info = read_error_response(stream).await?;
+                return Err(TapError::PostgresConnectionRedacted(error_info.message));
             }
             TYPE_NOTICE_RESPONSE => {
                 let len = read_i32(stream).await?;
@@ -93,16 +93,16 @@ pub(crate) async fn read_ready_for_query(
 }
 
 /// Send a Query ('Q') message.
+///
+/// The query string is sent with a trailing NUL terminator as required by
+/// the PostgreSQL wire protocol.
 pub(crate) async fn send_query(
     stream: &mut MaybeTls,
     query: &str,
 ) -> Result<(), TapError> {
-    let mut msg = Vec::new();
-    msg.push(TYPE_QUERY);
-    let len = (query.len() + 1 + 4) as i32;
-    msg.extend_from_slice(&len.to_be_bytes());
-    msg.extend_from_slice(query.as_bytes());
-    msg.push(0);
+    let mut payload = query.as_bytes().to_vec();
+    payload.push(0);
+    let msg = build_message(TYPE_QUERY, &payload);
     stream.write_all(&msg).await.map_err(wrap_io_err)?;
     stream.flush().await.map_err(wrap_io_err)?;
     Ok(())
@@ -121,9 +121,9 @@ pub(crate) async fn read_copy_both_response(
             Ok(())
         }
         TYPE_ERROR_RESPONSE => {
-            let error_msg = read_error_response(stream).await?;
+            let error_info = read_error_response(stream).await?;
             Err(TapError::PostgresConnectionRedacted(format!(
-                "START_REPLICATION rejected: {error_msg}"
+                "START_REPLICATION rejected: {error_info}"
             )))
         }
         other => Err(proto_err(format!(
@@ -147,11 +147,7 @@ pub(crate) async fn send_standby_status_update(
     payload.extend_from_slice(&0i64.to_be_bytes());
     payload.push(0);
 
-    let mut msg = Vec::with_capacity(payload.len() + 5);
-    msg.push(TYPE_COPY_DATA);
-    msg.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
-    msg.extend_from_slice(&payload);
-
+    let msg = build_message(TYPE_COPY_DATA, &payload);
     stream.write_all(&msg).await.map_err(wrap_io_err)?;
     stream.flush().await.map_err(wrap_io_err)?;
     debug!("sent standby status update (received={received_lsn}, flushed={flushed_lsn})");
@@ -190,10 +186,10 @@ pub(crate) async fn read_string_to_nul(
         .map_err(|e| TapError::Decode(format!("invalid UTF-8 in wire message: {e}")))
 }
 
-/// Read an ErrorResponse ('E') message and return the human-readable message.
+/// Read an ErrorResponse ('E') message and return structured error information.
 pub(crate) async fn read_error_response(
     stream: &mut MaybeTls,
-) -> Result<String, TapError> {
+) -> Result<ErrorInfo, TapError> {
     let len = read_i32(stream).await?;
     let payload_len = (len - 4) as usize;
     if payload_len > MAX_MESSAGE_SIZE {
@@ -205,13 +201,40 @@ pub(crate) async fn read_error_response(
     tokio::io::AsyncReadExt::read_exact(stream, &mut payload)
         .await
         .map_err(wrap_io_err)?;
-    Ok(extract_error_message(&payload))
+    Ok(parse_error_response(&payload))
 }
 
-/// Extract the human-readable message from an ErrorResponse payload.
-pub(crate) fn extract_error_message(payload: &[u8]) -> String {
+/// Structured error information from a PostgreSQL ErrorResponse.
+///
+/// The PostgreSQL wire protocol ErrorResponse ('E') contains fields keyed
+/// by a single byte. Common fields include:
+/// * `S` — severity (e.g. "ERROR", "FATAL")
+/// * `M` — human-readable message
+/// * `C` — SQLSTATE code (e.g. "42710")
+/// * `H` — hint (optional)
+/// * `P` — position in the original query (optional)
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ErrorInfo {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub hint: String,
+    pub position: String,
+}
+
+impl std::fmt::Display for ErrorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+/// Parse an ErrorResponse payload into a structured [`ErrorInfo`].
+///
+/// If the payload cannot be parsed as field-type-delimited frames (e.g. it
+/// contains only raw text), the entire payload is stored as the message.
+pub(crate) fn parse_error_response(payload: &[u8]) -> ErrorInfo {
+    let mut info = ErrorInfo::default();
     let mut i = 0;
-    let mut message = String::new();
     while i < payload.len() {
         let field_type = payload[i];
         i += 1;
@@ -222,19 +245,23 @@ pub(crate) fn extract_error_message(payload: &[u8]) -> String {
         while i < payload.len() && payload[i] != 0 {
             i += 1;
         }
-        let value = String::from_utf8_lossy(&payload[start..i]);
-        if field_type == b'M' {
-            message = value.to_string();
+        let value = String::from_utf8_lossy(&payload[start..i]).to_string();
+        match field_type {
+            b'S' => info.severity = value,
+            b'M' => info.message = value,
+            b'C' => info.code = value,
+            b'H' => info.hint = value,
+            b'P' => info.position = value,
+            _ => {}
         }
         if i < payload.len() && payload[i] == 0 {
             i += 1;
         }
     }
-    if message.is_empty() {
-        String::from_utf8_lossy(payload).to_string()
-    } else {
-        message
+    if info.message.is_empty() {
+        info.message = String::from_utf8_lossy(payload).to_string();
     }
+    info
 }
 
 /// Parse SASL mechanism names from an AuthenticationSASL message payload.
@@ -269,12 +296,25 @@ pub(crate) async fn skip_bytes(
     Ok(())
 }
 
+/// Build a wire message frame: `msg_type | Int32(total_len) | payload`.
+///
+/// `total_len` = payload.len() + 4 (for the length field itself).
+/// This is the standard PostgreSQL message framing used by CopyData,
+/// PasswordMessage, Query, and most other protocol messages.
+pub(crate) fn build_message(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(1 + 4 + payload.len());
+    msg.push(msg_type);
+    msg.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+    msg.extend_from_slice(payload);
+    msg
+}
+
 /// Build a SASLResponse message: `'p' | Int32 length | client_final_bytes`.
+///
+/// Unlike `SASLInitialResponse` (which uses a nested `Int32` for the
+/// mechanism name), the `SASLResponse` message is a plain password-message
+/// frame with no inner length prefix — the payload is just the client-final
+/// data. See the PostgreSQL wire-protocol docs for `AuthenticationSASLFinal`.
 pub(crate) fn build_sasl_response(client_final: &[u8]) -> Vec<u8> {
-    let mut resp = Vec::with_capacity(1 + 4 + client_final.len());
-    resp.push(TYPE_PASSWORD_MESSAGE);
-    let len = (client_final.len() + 4) as i32;
-    resp.extend_from_slice(&len.to_be_bytes());
-    resp.extend_from_slice(client_final);
-    resp
+    build_message(TYPE_PASSWORD_MESSAGE, client_final)
 }

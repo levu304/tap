@@ -415,7 +415,13 @@ impl PgConnection {
         start_lsn: Lsn,
         plugin: &str,
     ) -> Result<ReplicationStream, TapError> {
-        crate::replication::start(&self.config, slot_name, publication, start_lsn, plugin).await
+        let opts = crate::replication::ReplicationOptions {
+            slot_name,
+            publication,
+            start_lsn,
+            plugin,
+        };
+        crate::replication::start(&self.config, &opts).await
     }
 
     /// Close the connection gracefully.

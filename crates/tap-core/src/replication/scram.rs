@@ -121,10 +121,16 @@ pub(crate) fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Result<Vec<u8
     Ok(derived_key)
 }
 
-/// XOR two byte vectors (panics if lengths differ).
-pub(crate) fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
-    assert_eq!(a.len(), b.len(), "xor_bytes: length mismatch");
-    a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
+/// XOR two byte vectors.
+pub(crate) fn xor_bytes(a: &[u8], b: &[u8]) -> Result<Vec<u8>, TapError> {
+    if a.len() != b.len() {
+        return Err(TapError::Decode(format!(
+            "xor_bytes length mismatch ({} vs {})",
+            a.len(),
+            b.len()
+        )));
+    }
+    Ok(a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect())
 }
 
 /// Hex-encode bytes (lowercase).
@@ -219,7 +225,7 @@ pub(crate) async fn perform_scram_auth(
     let client_key = hmac_sha256(&salted_password, b"Client Key")?;
     let stored_key = sha256(&client_key)?;
     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
-    let client_proof = xor_bytes(&client_key, &client_signature);
+    let client_proof = xor_bytes(&client_key, &client_signature)?;
     let client_proof_b64 =
         base64::engine::general_purpose::STANDARD.encode(&client_proof);
 

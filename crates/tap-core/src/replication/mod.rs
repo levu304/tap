@@ -14,6 +14,21 @@
 //!    a channel-backed [`ReplicationStream`].
 //! 6. The reader parses `XLogData` frames (strips 25-byte header) and
 //!    auto-responds to `Keepalive` messages with `StandbyStatusUpdate`.
+//!
+//! # TLS modes
+//!
+//! The [`SslMode`](crate::config::SslMode) variants affect TLS behaviour as
+//! follows:
+//!
+//! | Mode | Description |
+//! |---|---|
+//! | `Disable` | Connect without TLS. |
+//! | `Require` | TLS required. Accepts any certificate (self-signed
+//!   included). |
+//! | `VerifyCa` | TLS required. Verifies the server certificate is
+//!   signed by a trusted CA but does **not** check the hostname. |
+//! | `VerifyFull` | TLS required. Full verification: trusted CA +
+//!   matching hostname. |
 
 use tokio::io::AsyncReadExt;
 use tracing::debug;
@@ -30,7 +45,7 @@ pub(crate) use scram::*;
 mod stream;
 pub use stream::ReplicationStream;
 #[allow(unused_imports)]
-pub(crate) use stream::{start, reader_task};
+pub(crate) use stream::{start, reader_task, ReplicationOptions};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1056,12 +1071,12 @@ mod tests {
     fn test_xor_bytes() {
         let a = vec![0xff, 0x00, 0xaa];
         let b = vec![0x0f, 0xf0, 0x55];
-        let result = xor_bytes(&a, &b);
+        let result = xor_bytes(&a, &b).unwrap();
         assert_eq!(result, vec![0xf0, 0xf0, 0xff]);
     }
 
     #[test]
-    fn test_extract_error_message() {
+    fn test_parse_error_response() {
         let mut payload = Vec::new();
         payload.push(b'S');
         payload.extend_from_slice(b"ERROR\0");
@@ -1071,8 +1086,10 @@ mod tests {
         payload.extend_from_slice(b"42P01\0");
         payload.push(0);
 
-        let msg = extract_error_message(&payload);
-        assert_eq!(msg, "relation does not exist");
+        let info = parse_error_response(&payload);
+        assert_eq!(info.severity, "ERROR");
+        assert_eq!(info.message, "relation does not exist");
+        assert_eq!(info.code, "42P01");
     }
 
     #[test]

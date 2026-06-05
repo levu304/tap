@@ -92,27 +92,46 @@ impl Stream for ReplicationStream {
     }
 }
 
+/// Parameters for starting a PostgreSQL replication stream.
+///
+/// Bundles the replication-specific parameters. The [`SourceConfig`] (host,
+/// port, credentials, TLS mode) is passed separately to [`start()`] since it
+/// is shared with the rest of the application.
+pub(crate) struct ReplicationOptions<'a> {
+    pub slot_name: &'a str,
+    pub publication: &'a str,
+    /// The LSN from which to begin consuming WAL.
+    ///
+    /// Use [`Lsn::ZERO`](crate::postgres::Lsn) to start from the slot's
+    /// last flushed position (PostgreSQL resumes where it left off).
+    pub start_lsn: Lsn,
+    pub plugin: &'a str,
+}
+
 /// Connect to Postgres over TCP/TLS, authenticate, issue `START_REPLICATION`,
 /// and return a [`ReplicationStream`] yielding WAL payload bytes.
+///
+/// **Important:** The function returns `Ok` *before* the background reader has
+/// processed the first message. Connection errors after `CopyBothResponse`
+/// (e.g. auth failures during `START_REPLICATION`) surface on the first call
+/// to [`ReplicationStream::poll_next`], not during `start()` itself.
 ///
 /// The connection is independent of the tokio-postgres `Client` used by
 /// [`PgConnection`](crate::postgres::PgConnection) — only this raw stream
 /// carries the COPY_BOTH protocol.
 pub async fn start(
     config: &SourceConfig,
-    slot_name: &str,
-    publication: &str,
-    start_lsn: Lsn,
-    plugin: &str,
+    opts: &ReplicationOptions<'_>,
 ) -> Result<ReplicationStream, TapError> {
     info!(
-        "starting replication stream (slot={slot_name}, publication={publication}, \
-         lsn={start_lsn}, plugin={plugin})"
+        "starting replication stream (slot={}, publication={}, \
+         lsn={}, plugin={})",
+        opts.slot_name, opts.publication, opts.start_lsn, opts.plugin
     );
 
-    validate_identifier(slot_name, "slot_name")?;
-    validate_identifier(publication, "publication")?;
-    validate_identifier(plugin, "plugin")?;
+    validate_identifier(opts.slot_name, "slot_name")?;
+    validate_identifier(opts.publication, "publication")?;
+    validate_identifier(opts.plugin, "plugin")?;
 
     let addr = format!("{}:{}", config.host, config.port);
     info!("connecting to {addr}");
@@ -152,6 +171,9 @@ pub async fn start(
 
         info!("wrapping connection with TLS");
 
+        // A new TlsConnector is built on every `start()` call because
+        // native_tls connectors are cheap to construct — caching them
+        // across calls adds complexity without measurable benefit.
         let mut tls_builder = native_tls::TlsConnector::builder();
         match config.ssl_mode {
             SslMode::Require => {
@@ -180,10 +202,11 @@ pub async fn start(
     authenticate(&mut stream, config).await?;
     read_ready_for_query(&mut stream).await?;
 
-    let lsn_str = start_lsn.to_string();
+    let lsn_str = opts.start_lsn.to_string();
     let query = format!(
-        "START_REPLICATION SLOT \"{slot_name}\" LOGICAL {lsn_str} \
-         (proto_version '1', publication_names '{publication}')"
+        "START_REPLICATION SLOT \"{}\" LOGICAL {lsn_str} \
+         (proto_version '1', publication_names '{}')",
+        opts.slot_name, opts.publication
     );
     send_query(&mut stream, &query).await?;
     read_copy_both_response(&mut stream).await?;
@@ -341,6 +364,9 @@ pub(crate) async fn reader_task(
 ) {
     let mut last_received_lsn: i64 = 0;
     let mut last_flushed_lsn: i64 = 0;
+    // Initialized to now() so the first heartbeat check doesn't fire
+    // immediately — it waits HEARTBEAT_INTERVAL_SECS before sending the
+    // first StandbyStatusUpdate, avoiding a redundant update on connect.
     let mut last_keepalive_time: tokio::time::Instant = tokio::time::Instant::now();
 
     loop {
@@ -386,15 +412,15 @@ pub(crate) async fn reader_task(
                 return;
             }
             TYPE_ERROR_RESPONSE => {
-                let error_msg = match read_error_response(&mut stream).await {
-                    Ok(m) => m,
+                let error_info = match read_error_response(&mut stream).await {
+                    Ok(info) => info,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
                 };
                 let _ = tx
-                    .send(Err(TapError::PostgresConnectionRedacted(error_msg)))
+                    .send(Err(TapError::PostgresConnectionRedacted(error_info.message)))
                     .await;
                 return;
             }
