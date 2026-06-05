@@ -290,6 +290,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         let _ = shutdown_tx.send(true);
     });
 
+    // Track the last successfully committed LSN for the final checkpoint.
+    // Updated on each successful write_offset call.
+    let mut last_committed_lsn: Option<Lsn> = None;
+
     loop {
         tokio::select! {
             // Shutdown signal
@@ -377,6 +381,8 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                             let store = state.lock().await;
                             if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false) {
                                 warn!("Failed to persist offset checkpoint: {e}");
+                            } else {
+                                last_committed_lsn = Some(lsn);
                             }
                         } else {
                             warn!(
@@ -395,7 +401,20 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
 
     println!(); // newline after status line
 
-    // ── 11. Graceful shutdown ────────────────────────────────────────
+    // ── 11. Final checkpoint ─────────────────────────────────────────
+    // Write final checkpoint with is_final=true so that read_last_offset
+    // prefers this row (via the is_final=1 query, avoiding the sequence
+    // fallback) — clean shutdown is distinguishable from a crash.
+    if let Some(lsn) = last_committed_lsn {
+        let store = state.lock().await;
+        if let Err(e) = store.write_offset(&lsn, "0", 0, true) {
+            warn!("Failed to persist final checkpoint: {e}");
+        } else {
+            info!("Final checkpoint written at {lsn}");
+        }
+    }
+
+    // ── 12. Graceful shutdown ────────────────────────────────────────
     info!("Shutting down...");
 
     // Stop SSE server (sends Shutdown event)
