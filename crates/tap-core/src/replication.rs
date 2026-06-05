@@ -330,10 +330,10 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                 let mut salt = [0u8; 4];
                 stream.read_exact(&mut salt).await.map_err(wrap_io_err)?;
                 let inner_digest =
-                    md5_digest(&[config.password.as_bytes(), config.user.as_bytes()].concat());
+                    md5_digest(&[config.password.as_bytes(), config.user.as_bytes()].concat())?;
                 let mut combined = inner_digest.as_bytes().to_vec();
                 combined.extend_from_slice(&salt);
-                let hash = md5_digest(&combined);
+                let hash = md5_digest(&combined)?;
                 let response = format!("md5{hash}");
                 send_password_message(stream, response.as_bytes()).await?;
             }
@@ -413,10 +413,10 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                         .decode(&salt_b64)
                         .map_err(|e| TapError::Decode(format!("invalid SCRAM salt base64: {e}")))?,
                     iterations,
-                );
-                let client_key = hmac_sha256(&salted_password, b"Client Key");
-                let stored_key = sha256(&client_key);
-                let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+                )?;
+                let client_key = hmac_sha256(&salted_password, b"Client Key")?;
+                let stored_key = sha256(&client_key)?;
+                let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
                 let client_proof = xor_bytes(&client_key, &client_signature);
                 let client_proof_b64 =
                     base64::engine::general_purpose::STANDARD.encode(&client_proof);
@@ -960,30 +960,36 @@ fn parse_scram_server_first(
 // ---------------------------------------------------------------------------
 
 /// Compute MD5 digest as a hex string.
-fn md5_digest(data: &[u8]) -> String {
-    let digest =
-        openssl::hash::hash(openssl::hash::MessageDigest::md5(), data).expect("MD5 hash failed");
-    hex_encode(&digest)
+fn md5_digest(data: &[u8]) -> Result<String, TapError> {
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), data)
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("MD5 hash failed: {e}")))?;
+    Ok(hex_encode(&digest))
 }
 
 /// Compute SHA-256 digest.
-fn sha256(data: &[u8]) -> Vec<u8> {
-    openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)
-        .expect("SHA-256 hash failed")
-        .to_vec()
+fn sha256(data: &[u8]) -> Result<Vec<u8>, TapError> {
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("SHA-256 hash failed: {e}")))?;
+    Ok(digest.to_vec())
 }
 
 /// Compute HMAC-SHA-256.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let key = openssl::pkey::PKey::hmac(key).expect("HMAC key creation failed");
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, TapError> {
+    let key =
+        openssl::pkey::PKey::hmac(key)
+            .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC key failed: {e}")))?;
     let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key)
-        .expect("HMAC signer creation failed");
-    signer.update(data).expect("HMAC update failed");
-    signer.sign_to_vec().expect("HMAC sign failed")
+        .map_err(|e| TapError::PostgresConnectionRedacted(format!("HMAC signer failed: {e}")))?;
+    signer.update(data).map_err(|e| {
+        TapError::PostgresConnectionRedacted(format!("HMAC update failed: {e}"))
+    })?;
+    signer.sign_to_vec().map_err(|e| {
+        TapError::PostgresConnectionRedacted(format!("HMAC sign failed: {e}"))
+    })
 }
 
 /// SCRAM Hi function: PBKDF2-HMAC-SHA256 with `iterations` rounds.
-fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
+fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Result<Vec<u8>, TapError> {
     let mut derived_key = vec![0u8; 32];
     openssl::pkcs5::pbkdf2_hmac(
         password,
@@ -992,8 +998,8 @@ fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
         openssl::hash::MessageDigest::sha256(),
         &mut derived_key,
     )
-    .expect("PBKDF2 failed");
-    derived_key
+    .map_err(|e| TapError::PostgresConnectionRedacted(format!("PBKDF2 failed: {e}")))?;
+    Ok(derived_key)
 }
 
 /// XOR two byte vectors (panics if lengths differ).
@@ -1126,13 +1132,13 @@ mod tests {
 
     #[test]
     fn test_md5_digest() {
-        let result = md5_digest(b"hello");
+        let result = md5_digest(b"hello").unwrap();
         assert_eq!(result, "5d41402abc4b2a76b9719d911017c592");
     }
 
     #[test]
     fn test_sha256_known() {
-        let result = sha256(b"hello");
+        let result = sha256(b"hello").unwrap();
         let expected = vec![
             0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9,
             0xe2, 0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62,
@@ -1145,7 +1151,7 @@ mod tests {
     fn test_hmac_sha256() {
         let key = b"key";
         let data = b"data";
-        let result = hmac_sha256(key, data);
+        let result = hmac_sha256(key, data).unwrap();
         let expected_hex = "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0";
         assert_eq!(hex_encode(&result), expected_hex);
     }
