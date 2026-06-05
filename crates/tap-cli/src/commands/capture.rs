@@ -335,6 +335,8 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                     }
                 };
 
+                let wal_len = wal_bytes.len();
+
                 match decoder.decode(&wal_bytes) {
                     Ok(dr) => {
                         let events = dr.events;
@@ -392,7 +394,18 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                         }
                     }
                     Err(e) => {
-                        warn!("WAL decode error: {e}");
+                        warn!("WAL decode error ({} bytes): {e}", wal_len);
+                        decoder.flush(); // Clear partial decoder state
+                        // Record skipped LSN so the same chunk is not retried
+                        // indefinitely on restart.
+                        if let Some(lsn) = replication_stream.current_lsn() {
+                            let store = state.lock().await;
+                            let _ = store.record_skipped_lsn(
+                                &lsn.to_string(),
+                                decoder.name(),
+                                &e.to_string(),
+                            );
+                        }
                     }
                 }
             }
