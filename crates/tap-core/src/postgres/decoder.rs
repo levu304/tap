@@ -15,15 +15,15 @@
 //!
 //! | Byte | Type       | Payload                                  |
 //! |------|------------|------------------------------------------|
-//! | `b`  | Begin      | LSN, commit_time_us, xid                 |
-//! | `i`  | Insert     | relation_id, tuple_type, TupleData       |
-//! | `u`  | Update     | relation_id, old_tuple_type?, TupleData* |
-//! | `d`  | Delete     | relation_id, old_tuple_type, TupleData   |
-//! | `c`  | Commit     | flags, commit_lsn, end_lsn, ts           |
-//! | `r`  | Relation   | relation_id, schema, table, columns...   |
-//! | `y`  | Type       | (skipped)                                |
-//! | `o`  | Origin     | (skipped)                                |
-//! | `t`  | Truncate   | (skipped)                                |
+//! | `B`  | Begin      | LSN, commit_time_us, xid                 |
+//! | `I`  | Insert     | relation_id, tuple_type, TupleData       |
+//! | `U`  | Update     | relation_id, old_tuple_type?, TupleData* |
+//! | `D`  | Delete     | relation_id, old_tuple_type, TupleData   |
+//! | `C`  | Commit     | Int8 flags, commit_lsn, end_lsn, ts      |
+//! | `R`  | Relation   | relation_id, schema, table, columns...   |
+//! | `Y`  | Type       | (skipped)                                |
+//! | `O`  | Origin     | (skipped)                                |
+//! | `T`  | Truncate   | (skipped)                                |
 //!
 //! All multi-byte integers are **network byte order** (big-endian).
 //! Strings are null-terminated C strings.
@@ -236,20 +236,20 @@ impl PgoutputDecoder {
             *offset += 1;
 
             match msg_type {
-                b'b' => self.decode_begin(buf, offset)?,
-                b'i' => self.decode_insert(buf, offset)?,
-                b'u' => self.decode_update(buf, offset)?,
-                b'd' => self.decode_delete(buf, offset)?,
-                b'c' => {
+                b'B' => self.decode_begin(buf, offset)?,
+                b'I' => self.decode_insert(buf, offset)?,
+                b'U' => self.decode_update(buf, offset)?,
+                b'D' => self.decode_delete(buf, offset)?,
+                b'C' => {
                     let mut commit_events = self.decode_commit(buf, offset)?;
                     events.append(&mut commit_events);
                 }
-                b'r' => self.decode_relation(buf, offset)?,
+                b'R' => self.decode_relation(buf, offset)?,
                 // Known ignorable types — parse enough to advance offset,
                 // then discard the data.
-                b'y' => self.skip_type(buf, offset)?,
-                b'o' => self.skip_origin(buf, offset)?,
-                b't' => self.skip_truncate(buf, offset)?,
+                b'Y' => self.skip_type(buf, offset)?,
+                b'O' => self.skip_origin(buf, offset)?,
+                b'T' => self.skip_truncate(buf, offset)?,
                 other => {
                     debug!(
                         "skipping unknown pgoutput message type byte: 0x{:02x}",
@@ -418,7 +418,7 @@ impl PgoutputDecoder {
         buf: &[u8],
         offset: &mut usize,
     ) -> Result<Vec<ChangeEvent>, TapError> {
-        let _flags = read_i64(buf, offset)?;
+        let _flags = read_i8(buf, offset)?;
         let commit_lsn = PgLsn::from_u64(read_i64(buf, offset)? as u64);
         self.last_commit_lsn = Some(commit_lsn);
         let _end_lsn = read_i64(buf, offset)?;
@@ -1169,9 +1169,9 @@ mod tests {
     }
 
     /// Build a pgoutput Begin message.
-    /// `'b' | Int64 lsn | Int64 commit_time_us | Int32 xid`
+    /// `'B' | Int64 lsn | Int64 commit_time_us | Int32 xid`
     fn build_begin(lsn: u64, commit_time_us: i64, xid: u32) -> Vec<u8> {
-        let mut msg = vec![b'b'];
+        let mut msg = vec![b'B'];
         msg.extend_from_slice(&be64(lsn));
         msg.extend_from_slice(&be64(commit_time_us as u64));
         msg.extend_from_slice(&be32(xid));
@@ -1185,7 +1185,7 @@ mod tests {
         table: &str,
         columns: &[(&str, u32, i32)], // (name, type_oid, modifier)
     ) -> Vec<u8> {
-        let mut msg = vec![b'r'];
+        let mut msg = vec![b'R'];
         msg.extend_from_slice(&be32(relation_id));
         msg.extend_from_slice(&cstring(schema));
         msg.extend_from_slice(&cstring(table));
@@ -1203,7 +1203,7 @@ mod tests {
     /// Build a pgoutput Insert message with text-valued columns.
     fn build_insert(relation_id: u32, values: &[(&[u8], bool)]) -> Vec<u8> {
         // values: (raw_bytes, is_null) — if is_null, raw_bytes is ignored
-        let mut msg = vec![b'i'];
+        let mut msg = vec![b'I'];
         msg.extend_from_slice(&be32(relation_id));
         msg.push(b'N'); // new tuple
         msg.extend_from_slice(&be16(values.len() as u16));
@@ -1225,7 +1225,7 @@ mod tests {
         old_values: Option<&[(&[u8], bool)]>,
         new_values: &[(&[u8], bool)],
     ) -> Vec<u8> {
-        let mut msg = vec![b'u'];
+        let mut msg = vec![b'U'];
         msg.extend_from_slice(&be32(relation_id));
 
         if let Some(old) = old_values {
@@ -1260,7 +1260,7 @@ mod tests {
 
     /// Build a pgoutput Delete message.
     fn build_delete(relation_id: u32, values: &[(&[u8], bool)]) -> Vec<u8> {
-        let mut msg = vec![b'd'];
+        let mut msg = vec![b'D'];
         msg.extend_from_slice(&be32(relation_id));
         msg.push(b'O'); // old tuple
         msg.extend_from_slice(&be16(values.len() as u16));
@@ -1277,9 +1277,10 @@ mod tests {
     }
 
     /// Build a pgoutput Commit message.
-    fn build_commit(flags: u64, commit_lsn: u64, end_lsn: u64, ts_us: i64) -> Vec<u8> {
-        let mut msg = vec![b'c'];
-        msg.extend_from_slice(&be64(flags));
+    /// Format: `'C' | Int8 flags | Int64 commit_lsn | Int64 end_lsn | Int64 ts_us`
+    fn build_commit(flags: u8, commit_lsn: u64, end_lsn: u64, ts_us: i64) -> Vec<u8> {
+        let mut msg = vec![b'C'];
+        msg.push(flags);
         msg.extend_from_slice(&be64(commit_lsn));
         msg.extend_from_slice(&be64(end_lsn));
         msg.extend_from_slice(&be64(ts_us as u64));
@@ -1302,7 +1303,7 @@ mod tests {
         for dml in dmls {
             msg.extend_from_slice(&dml);
         }
-        msg.extend_from_slice(&build_commit(0, commit_lsn, commit_lsn, ts_us));
+        msg.extend_from_slice(&build_commit(0u8, commit_lsn, commit_lsn, ts_us));
         msg
     }
 
@@ -1464,7 +1465,7 @@ mod tests {
         // Begin + Insert + Commit referencing relation 5
         msg.extend_from_slice(&build_begin(0x10, 100_000i64, 1));
         msg.extend_from_slice(&build_insert(5, &[(b"123", false)]));
-        msg.extend_from_slice(&build_commit(0, 0x20, 0x20, 100_000i64));
+        msg.extend_from_slice(&build_commit(0u8, 0x20, 0x20, 100_000i64));
 
         let events = decoder.decode(&msg).unwrap().events;
         assert_eq!(events.len(), 1);
@@ -1487,8 +1488,8 @@ mod tests {
     fn test_decode_pgoutput_malformed() {
         let mut decoder = PgoutputDecoder::new("");
 
-        // Truncated message — single 'b' with no payload
-        let result = decoder.decode(b"b");
+        // Truncated message — single 'B' with no payload
+        let result = decoder.decode(b"B");
         assert!(result.is_err(), "truncated Begin should error");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("unexpected end of data"));
@@ -1507,8 +1508,8 @@ mod tests {
     fn test_decode_pgoutput_unknown_type_skipped() {
         let mut decoder = PgoutputDecoder::new("");
 
-        // 'y' (Type) message — known-ignorable
-        let mut msg = vec![b'y', 0, 0, 0, 10]; // type oid=10
+        // 'Y' (Type) message — known-ignorable
+        let mut msg = vec![b'Y', 0, 0, 0, 10]; // type oid=10
         msg.extend_from_slice(&cstring("pg_catalog")); // nsp
         msg.extend_from_slice(&cstring("text")); // name
         // Followed by a valid transaction
@@ -1635,7 +1636,7 @@ mod tests {
                 (b"19.99", false),  // price → float
             ],
         );
-        let commit = build_commit(0, 0x20, 0x20, 1_000_000i64);
+        let commit = build_commit(0u8, 0x20, 0x20, 1_000_000i64);
 
         let mut msg = Vec::new();
         msg.extend_from_slice(&rel);
@@ -1955,14 +1956,14 @@ mod tests {
         // Build a message with 't' (Truncate), 'o' (Origin), and a valid txn
         let mut msg = Vec::new();
 
-        // Truncate: 't' | Int32 nrels | Int32 relids[nrels] | Byte1 options
-        msg.push(b't');
+        // Truncate: 'T' | Int32 nrels | Int32 relids[nrels] | Byte1 options
+        msg.push(b'T');
         msg.extend_from_slice(&be32(1)); // 1 relation
         msg.extend_from_slice(&be32(42)); // relation 42
         msg.push(0); // options = 0 (cascade)
 
-        // Origin: 'o' | String name | Int64 lsn
-        msg.push(b'o');
+        // Origin: 'O' | String name | Int64 lsn
+        msg.push(b'O');
         msg.extend_from_slice(&cstring("test_origin"));
         msg.extend_from_slice(&be64(0x100));
 
