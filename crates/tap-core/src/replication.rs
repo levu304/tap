@@ -22,7 +22,7 @@ use base64::Engine;
 use futures::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::{validate_identifier, SourceConfig, SslMode};
 use crate::error::TapError;
@@ -124,12 +124,34 @@ impl AsyncWrite for MaybeTls {
 /// are yielded.
 pub struct ReplicationStream {
     rx: mpsc::Receiver<Result<Vec<u8>, TapError>>,
+    /// Handle to the background reader task.  Aborted on drop to prevent
+    /// orphaned tasks.  When the channel closes unexpectedly, the handle's
+    /// `is_finished()` state is checked to detect possible panics.
+    reader_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ReplicationStream {
     /// Create a stream from an mpsc receiver (used internally and for tests).
     pub fn from_receiver(rx: mpsc::Receiver<Result<Vec<u8>, TapError>>) -> Self {
-        Self { rx }
+        Self {
+            rx,
+            reader_handle: None,
+        }
+    }
+
+    /// Attach the reader task handle (called from [`start`]).
+    fn set_reader_handle(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.reader_handle = Some(handle);
+    }
+}
+
+impl Drop for ReplicationStream {
+    fn drop(&mut self) {
+        if let Some(handle) = self.reader_handle.take() {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
     }
 }
 
@@ -137,7 +159,21 @@ impl Stream for ReplicationStream {
     type Item = Result<Vec<u8>, TapError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
+        let result = self.rx.poll_recv(cx);
+        // If the channel closed and the reader task also finished, it may
+        // have panicked (normal exit only sends errors through the channel
+        // before returning, which would keep the channel alive).  Log a
+        // warning so the operator has a diagnostic hint.
+        if let Poll::Ready(None) = &result {
+            if self
+                .reader_handle
+                .as_ref()
+                .is_some_and(|h| h.is_finished())
+            {
+                warn!("reader task finished while channel closed — possible panic");
+            }
+        }
+        result
     }
 }
 
@@ -259,10 +295,13 @@ pub async fn start(
 
     // 8. Spawn background reader task
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::spawn(reader_task(stream, tx));
+    let reader_handle = tokio::spawn(reader_task(stream, tx));
+
+    let mut stream = ReplicationStream::from_receiver(rx);
+    stream.set_reader_handle(reader_handle);
 
     info!("replication stream established");
-    Ok(ReplicationStream::from_receiver(rx))
+    Ok(stream)
 }
 
 // ---------------------------------------------------------------------------
