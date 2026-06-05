@@ -16,8 +16,8 @@
 //!    auto-responds to `Keepalive` messages with `StandbyStatusUpdate`.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::task::{Context, Poll};
 
 use base64::Engine;
@@ -154,7 +154,6 @@ impl ReplicationStream {
             current_lsn: Arc::new(AtomicI64::new(-1)),
         }
     }
-
 
     // set_reader_handle was removed — the reader handle is now attached during
     // construction in [`start()`].  Tests using [`from_receiver()`] will have
@@ -351,7 +350,11 @@ pub async fn start(
     let reader_lsn = Arc::clone(&current_lsn);
     let reader_handle = tokio::spawn(reader_task(stream, tx, reader_lsn));
 
-    let stream = ReplicationStream { rx, reader_handle: Some(reader_handle), current_lsn };
+    let stream = ReplicationStream {
+        rx,
+        reader_handle: Some(reader_handle),
+        current_lsn,
+    };
 
     info!("replication stream established");
     Ok(stream)
