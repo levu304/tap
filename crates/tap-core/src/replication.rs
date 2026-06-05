@@ -383,16 +383,12 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                 let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
                 let client_final_bytes = client_final.as_bytes();
 
-                // Send SASLResponse (type 'p' with protocol payload)
-                // Format: 'p' | Int32 len | Int32 client_response_len | bytes
-                // Note: For the client-final message, we send it as a
-                // password message with a different inner structure.
-                let mut resp = Vec::new();
-                resp.push(b'p');
-                let inner_len = (client_final_bytes.len() + 4) as i32; // +4 for the Int32 length field in protocol
-                resp.extend_from_slice(&(inner_len + 4).to_be_bytes());
-                resp.extend_from_slice(&inner_len.to_be_bytes());
-                resp.extend_from_slice(client_final_bytes);
+                // Send SASLResponse (type 'p')
+                // Format: 'p' | Int32 len | ByteN client-final-message
+                // Per the PostgreSQL protocol, SASLResponse is a plain
+                // PasswordMessage containing just the client-final bytes —
+                // no extra inner length prefix (unlike SASLInitialResponse).
+                let resp = build_sasl_response(client_final_bytes);
 
                 stream.write_all(&resp).await.map_err(wrap_io_err)?;
                 stream.flush().await.map_err(wrap_io_err)?;
@@ -975,6 +971,20 @@ fn hex_encode(data: &[u8]) -> String {
     s
 }
 
+/// Build a SASLResponse message: `'p' | Int32 length | client_final_bytes`.
+///
+/// This is a plain PasswordMessage — just the type byte, the total length
+/// (including the 4-byte length field), and the client-final SCRAM payload.
+/// Unlike SASLInitialResponse, there is **no** extra inner-length prefix.
+fn build_sasl_response(client_final: &[u8]) -> Vec<u8> {
+    let mut resp = Vec::with_capacity(1 + 4 + client_final.len());
+    resp.push(b'p');
+    let len = (client_final.len() + 4) as i32;
+    resp.extend_from_slice(&len.to_be_bytes());
+    resp.extend_from_slice(client_final);
+    resp
+}
+
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -1052,6 +1062,23 @@ mod tests {
         let client_nonce = "abc123";
         let server_msg = "r=xyz789,s=AAAA,i=4096";
         assert!(parse_scram_server_first(server_msg, client_nonce).is_err());
+    }
+
+    #[test]
+    fn test_build_sasl_response_wire_format() {
+        // SASLResponse must be: 'p' | Int32(len = 4 + N) | N bytes
+        // No extra inner Int32 prefix (unlike SASLInitialResponse).
+        let client_final = b"c=biws,r=abc123,p=proof";
+        let result = build_sasl_response(client_final);
+        let expected_len = 1 + 4 + client_final.len();
+
+        assert_eq!(result.len(), expected_len, "wire size");
+        assert_eq!(result[0], b'p', "message type byte");
+
+        let wire_len = i32::from_be_bytes(result[1..5].try_into().unwrap()) as usize;
+        assert_eq!(wire_len, client_final.len() + 4, "length field");
+
+        assert_eq!(&result[5..], client_final, "payload");
     }
 
     // ── Crypto helpers ──────────────────────────────────────────────
