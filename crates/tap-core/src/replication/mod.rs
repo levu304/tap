@@ -45,7 +45,7 @@ pub(crate) use scram::*;
 mod stream;
 pub use stream::ReplicationStream;
 #[allow(unused_imports)]
-pub(crate) use stream::{start, reader_task, ReplicationOptions};
+pub(crate) use stream::{ReplicationOptions, reader_task, start};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -196,13 +196,13 @@ fn proto_err(msg: String) -> TapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SslMode;
+    use base64::Engine;
     use std::sync::Arc;
     use std::sync::atomic::AtomicI64;
     use std::time::Duration;
-    use base64::Engine;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
-    use crate::config::SslMode;
 
     // ------------------------------------------------------------------
     // Test helpers

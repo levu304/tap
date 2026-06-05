@@ -1,6 +1,7 @@
-use super::{MaybeTls, SourceConfig, TapError, proto_err, wrap_io_err,
-            build_sasl_response, read_sasl_mechanisms, read_u8, read_i32,
-            read_string_to_nul, TYPE_AUTHENTICATION};
+use super::{
+    MaybeTls, SourceConfig, TYPE_AUTHENTICATION, TapError, build_sasl_response, proto_err,
+    read_i32, read_sasl_mechanisms, read_string_to_nul, read_u8, wrap_io_err,
+};
 use base64::Engine;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
@@ -164,8 +165,7 @@ pub(crate) async fn perform_scram_auth(
 
     let password = config.password.as_bytes();
     let client_nonce = generate_nonce();
-    let client_first_bare =
-        format!("n={},r={}", scram_client_first_bare(config), client_nonce);
+    let client_first_bare = format!("n={},r={}", scram_client_first_bare(config), client_nonce);
     let client_first = String::from("n,,") + &client_first_bare;
     let client_first_bytes = client_first.as_bytes();
     let client_first_len = client_first_bytes.len() as i32;
@@ -212,8 +212,7 @@ pub(crate) async fn perform_scram_auth(
         parse_scram_server_first(&server_first, &client_nonce)?;
 
     let client_final_without_proof = format!("c=biws,r={server_nonce}");
-    let auth_message =
-        format!("{client_first_bare},{server_first},{client_final_without_proof}");
+    let auth_message = format!("{client_first_bare},{server_first},{client_final_without_proof}");
 
     let salted_password = hi(
         password,
@@ -226,8 +225,7 @@ pub(crate) async fn perform_scram_auth(
     let stored_key = sha256(&client_key)?;
     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
     let client_proof = xor_bytes(&client_key, &client_signature)?;
-    let client_proof_b64 =
-        base64::engine::general_purpose::STANDARD.encode(&client_proof);
+    let client_proof_b64 = base64::engine::general_purpose::STANDARD.encode(&client_proof);
 
     let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
     let client_final_bytes = client_final.as_bytes();
@@ -267,8 +265,7 @@ pub(crate) async fn perform_scram_auth(
             if let Some(sig_b64) = server_final.strip_prefix("v=") {
                 let server_key = hmac_sha256(&salted_password, b"Server Key")?;
                 let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes())?;
-                let expected_b64 =
-                    base64::engine::general_purpose::STANDARD.encode(&expected_sig);
+                let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&expected_sig);
                 if sig_b64 != expected_b64 {
                     return Err(TapError::PostgresConnectionRedacted(
                         "SCRAM server signature mismatch".into(),

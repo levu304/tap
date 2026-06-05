@@ -13,14 +13,11 @@ use crate::error::TapError;
 use crate::postgres::Lsn;
 
 use super::{
-    MaybeTls, send_startup, send_query, read_ready_for_query, read_copy_both_response,
-    send_standby_status_update, read_error_response, read_u8, read_i32, skip_bytes,
-    authenticate, wrap_io_err,
-    CHANNEL_CAPACITY, HEARTBEAT_INTERVAL_SECS, READ_TIMEOUT_SECS,
-    SSL_REQUEST_CODE, TYPE_SSL_ACCEPTED,
-    SUBTYPE_XLOG_DATA, SUBTYPE_KEEPALIVE, SUBTYPE_STANDBY_STATUS_UPDATE,
-    TYPE_COPY_DATA, TYPE_COPY_DONE, TYPE_ERROR_RESPONSE,
-    XLOG_DATA_HEADER_SIZE, KEEPALIVE_HEADER_SIZE,
+    CHANNEL_CAPACITY, HEARTBEAT_INTERVAL_SECS, KEEPALIVE_HEADER_SIZE, MaybeTls, READ_TIMEOUT_SECS,
+    SSL_REQUEST_CODE, SUBTYPE_KEEPALIVE, SUBTYPE_STANDBY_STATUS_UPDATE, SUBTYPE_XLOG_DATA,
+    TYPE_COPY_DATA, TYPE_COPY_DONE, TYPE_ERROR_RESPONSE, TYPE_SSL_ACCEPTED, XLOG_DATA_HEADER_SIZE,
+    authenticate, read_copy_both_response, read_error_response, read_i32, read_ready_for_query,
+    read_u8, send_query, send_standby_status_update, send_startup, skip_bytes, wrap_io_err,
 };
 
 /// A stream of raw WAL payload bytes from a Postgres logical replication
@@ -286,10 +283,8 @@ pub(crate) async fn parse_copy_data_payload(
                     .await;
                 return false;
             }
-            let start_lsn_arr: [u8; 8] =
-                payload[1..9].try_into().expect("XLogData size validated");
-            let end_lsn_arr: [u8; 8] =
-                payload[9..17].try_into().expect("XLogData size validated");
+            let start_lsn_arr: [u8; 8] = payload[1..9].try_into().expect("XLogData size validated");
+            let end_lsn_arr: [u8; 8] = payload[9..17].try_into().expect("XLogData size validated");
             let ts_arr: [u8; 8] = payload[17..XLOG_DATA_HEADER_SIZE]
                 .try_into()
                 .expect("XLogData size validated");
@@ -310,14 +305,11 @@ pub(crate) async fn parse_copy_data_payload(
                 debug!("truncated Keepalive message, skipping");
                 return true;
             }
-            let wal_end_arr: [u8; 8] =
-                payload[1..9].try_into().expect("Keepalive size validated");
-            let _ts_arr: [u8; 8] =
-                payload[9..17].try_into().expect("Keepalive size validated");
+            let wal_end_arr: [u8; 8] = payload[1..9].try_into().expect("Keepalive size validated");
+            let _ts_arr: [u8; 8] = payload[9..17].try_into().expect("Keepalive size validated");
             let wal_end = i64::from_be_bytes(wal_end_arr);
             let _ts = i64::from_be_bytes(_ts_arr);
-            let reply_required =
-                payload.len() >= KEEPALIVE_HEADER_SIZE && payload[17] != 0;
+            let reply_required = payload.len() >= KEEPALIVE_HEADER_SIZE && payload[17] != 0;
 
             *last_flushed_lsn = (*last_flushed_lsn).max(wal_end);
             *last_received_lsn = (*last_received_lsn).max(wal_end);
@@ -420,7 +412,9 @@ pub(crate) async fn reader_task(
                     }
                 };
                 let _ = tx
-                    .send(Err(TapError::PostgresConnectionRedacted(error_info.message)))
+                    .send(Err(TapError::PostgresConnectionRedacted(
+                        error_info.message,
+                    )))
                     .await;
                 return;
             }

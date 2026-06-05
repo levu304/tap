@@ -1,8 +1,8 @@
 use super::{
-    MaybeTls, TapError, SourceConfig, PG_PROTOCOL_VERSION, MAX_MESSAGE_SIZE,
-    TYPE_COPY_DATA, TYPE_COPY_BOTH_RESPONSE, TYPE_ERROR_RESPONSE,
-    TYPE_PASSWORD_MESSAGE, TYPE_QUERY, TYPE_READY_FOR_QUERY, TYPE_NOTICE_RESPONSE,
-    TYPE_BACKEND_KEY_DATA, SUBTYPE_STANDBY_STATUS_UPDATE, wrap_io_err, proto_err,
+    MAX_MESSAGE_SIZE, MaybeTls, PG_PROTOCOL_VERSION, SUBTYPE_STANDBY_STATUS_UPDATE, SourceConfig,
+    TYPE_BACKEND_KEY_DATA, TYPE_COPY_BOTH_RESPONSE, TYPE_COPY_DATA, TYPE_ERROR_RESPONSE,
+    TYPE_NOTICE_RESPONSE, TYPE_PASSWORD_MESSAGE, TYPE_QUERY, TYPE_READY_FOR_QUERY, TapError,
+    proto_err, wrap_io_err,
 };
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
@@ -53,9 +53,7 @@ pub(crate) async fn send_password_message(
 }
 
 /// Read a Query response until we see ReadyForQuery ('Z').
-pub(crate) async fn read_ready_for_query(
-    stream: &mut MaybeTls,
-) -> Result<(), TapError> {
+pub(crate) async fn read_ready_for_query(stream: &mut MaybeTls) -> Result<(), TapError> {
     loop {
         let msg_type = read_u8(stream).await?;
         match msg_type {
@@ -96,10 +94,7 @@ pub(crate) async fn read_ready_for_query(
 ///
 /// The query string is sent with a trailing NUL terminator as required by
 /// the PostgreSQL wire protocol.
-pub(crate) async fn send_query(
-    stream: &mut MaybeTls,
-    query: &str,
-) -> Result<(), TapError> {
+pub(crate) async fn send_query(stream: &mut MaybeTls, query: &str) -> Result<(), TapError> {
     let mut payload = query.as_bytes().to_vec();
     payload.push(0);
     let msg = build_message(TYPE_QUERY, &payload);
@@ -109,9 +104,7 @@ pub(crate) async fn send_query(
 }
 
 /// Read a CopyBothResponse ('W') message.
-pub(crate) async fn read_copy_both_response(
-    stream: &mut MaybeTls,
-) -> Result<(), TapError> {
+pub(crate) async fn read_copy_both_response(stream: &mut MaybeTls) -> Result<(), TapError> {
     let msg_type = read_u8(stream).await?;
     match msg_type {
         TYPE_COPY_BOTH_RESPONSE => {
@@ -171,9 +164,7 @@ pub(crate) async fn read_i32(stream: &mut MaybeTls) -> Result<i32, TapError> {
 }
 
 /// Read bytes until a NUL terminator and return the string.
-pub(crate) async fn read_string_to_nul(
-    stream: &mut MaybeTls,
-) -> Result<String, TapError> {
+pub(crate) async fn read_string_to_nul(stream: &mut MaybeTls) -> Result<String, TapError> {
     let mut bytes = Vec::new();
     loop {
         let b = read_u8(stream).await?;
@@ -187,9 +178,7 @@ pub(crate) async fn read_string_to_nul(
 }
 
 /// Read an ErrorResponse ('E') message and return structured error information.
-pub(crate) async fn read_error_response(
-    stream: &mut MaybeTls,
-) -> Result<ErrorInfo, TapError> {
+pub(crate) async fn read_error_response(stream: &mut MaybeTls) -> Result<ErrorInfo, TapError> {
     let len = read_i32(stream).await?;
     let payload_len = (len - 4) as usize;
     if payload_len > MAX_MESSAGE_SIZE {
@@ -265,9 +254,7 @@ pub(crate) fn parse_error_response(payload: &[u8]) -> ErrorInfo {
 }
 
 /// Parse SASL mechanism names from an AuthenticationSASL message payload.
-pub(crate) async fn read_sasl_mechanisms(
-    stream: &mut MaybeTls,
-) -> Result<Vec<String>, TapError> {
+pub(crate) async fn read_sasl_mechanisms(stream: &mut MaybeTls) -> Result<Vec<String>, TapError> {
     let mut mechanisms = Vec::new();
     loop {
         let mech = read_string_to_nul(stream).await?;
@@ -280,10 +267,7 @@ pub(crate) async fn read_sasl_mechanisms(
 }
 
 /// Skip `count` bytes from the stream.
-pub(crate) async fn skip_bytes(
-    stream: &mut MaybeTls,
-    count: usize,
-) -> Result<(), TapError> {
+pub(crate) async fn skip_bytes(stream: &mut MaybeTls, count: usize) -> Result<(), TapError> {
     if count > MAX_MESSAGE_SIZE {
         return Err(TapError::Decode(format!(
             "attempted to skip {count} bytes (max {MAX_MESSAGE_SIZE})"
