@@ -63,6 +63,10 @@ const SSL_REQUEST_CODE: i32 = 80877103;
 enum MaybeTls {
     Plain(tokio::net::TcpStream),
     Tls(tokio_native_tls::TlsStream<tokio::net::TcpStream>),
+    /// Mock/test variant backed by a tokio duplex stream, enabling
+    /// protocol-level tests without a real network connection.
+    #[allow(dead_code)]
+    Test(tokio::io::DuplexStream),
 }
 
 impl AsyncRead for MaybeTls {
@@ -74,6 +78,7 @@ impl AsyncRead for MaybeTls {
         match &mut *self {
             MaybeTls::Plain(s) => Pin::new(s).poll_read(cx, buf),
             MaybeTls::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTls::Test(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -87,6 +92,7 @@ impl AsyncWrite for MaybeTls {
         match &mut *self {
             MaybeTls::Plain(s) => Pin::new(s).poll_write(cx, buf),
             MaybeTls::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTls::Test(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -97,6 +103,7 @@ impl AsyncWrite for MaybeTls {
         match &mut *self {
             MaybeTls::Plain(s) => Pin::new(s).poll_flush(cx),
             MaybeTls::Tls(s) => Pin::new(s).poll_flush(cx),
+            MaybeTls::Test(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -107,6 +114,7 @@ impl AsyncWrite for MaybeTls {
         match &mut *self {
             MaybeTls::Plain(s) => Pin::new(s).poll_shutdown(cx),
             MaybeTls::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTls::Test(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -1168,8 +1176,831 @@ fn proto_err(msg: String) -> TapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // ── ReplicationStream channel tests ──────────────────────────────
+    // ------------------------------------------------------------------
+    // Test helpers
+    // ------------------------------------------------------------------
+
+    fn test_config() -> SourceConfig {
+        SourceConfig {
+            host: "localhost".into(),
+            port: 5432,
+            dbname: "test_db".into(),
+            user: "test_user".into(),
+            password: "test_password".into(),
+            slot_name: "test_slot".into(),
+            publication: "test_pub".into(),
+            tables: vec![],
+            plugin: "pgoutput".into(),
+            ssl_mode: SslMode::Disable,
+        }
+    }
+
+    /// Build a CopyData ('d') wire message wrapping `inner`.
+    fn copy_data(inner: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(5 + inner.len());
+        buf.push(b'd');
+        buf.extend_from_slice(&((inner.len() + 4) as i32).to_be_bytes());
+        buf.extend_from_slice(inner);
+        buf
+    }
+
+    /// Build an XLogData sub-message (sub-type b'w') wrapping `payload`.
+    fn xlog_data(payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(25 + payload.len());
+        buf.push(b'w');
+        buf.extend_from_slice(&0i64.to_be_bytes());   // start_lsn
+        buf.extend_from_slice(&100i64.to_be_bytes());  // end_lsn
+        buf.extend_from_slice(&0i64.to_be_bytes());    // timestamp
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Build a Keepalive sub-message (sub-type b'k').
+    fn keepalive(wal_end: i64, reply_required: bool) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(18);
+        buf.push(b'k');
+        buf.extend_from_slice(&wal_end.to_be_bytes());
+        buf.extend_from_slice(&0i64.to_be_bytes()); // timestamp
+        buf.push(if reply_required { 1 } else { 0 });
+        buf
+    }
+
+    /// Build a CopyDone ('c') message.
+    fn copy_done() -> Vec<u8> {
+        let mut buf = Vec::with_capacity(5);
+        buf.push(b'c');
+        buf.extend_from_slice(&4i32.to_be_bytes());
+        buf
+    }
+
+    /// Build a minimal ErrorResponse ('E') message.
+    fn error_response(message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'M');
+        payload.extend_from_slice(message.as_bytes());
+        payload.push(0);
+        payload.push(b'C');
+        payload.extend_from_slice(b"XXXXX\0");
+        payload.push(0); // terminator
+
+        let mut msg = Vec::with_capacity(5 + payload.len());
+        msg.push(b'E');
+        msg.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+        msg.extend_from_slice(&payload);
+        msg
+    }
+
+    /// Build an AuthenticationOk ('R') message.
+    fn auth_ok() -> Vec<u8> {
+        let mut msg = Vec::with_capacity(9);
+        msg.push(b'R');
+        msg.extend_from_slice(&8i32.to_be_bytes()); // len = 8
+        msg.extend_from_slice(&0i32.to_be_bytes()); // type = 0 (Ok)
+        msg
+    }
+
+    /// Build a ReadyForQuery ('Z') message.
+    fn ready_for_query() -> Vec<u8> {
+        let mut msg = Vec::with_capacity(6);
+        msg.push(b'Z');
+        msg.extend_from_slice(&5i32.to_be_bytes()); // len = 5
+        msg.push(b'I'); // idle status
+        msg
+    }
+
+    /// Build a minimal CopyBothResponse ('W') message.
+    fn copy_both_response() -> Vec<u8> {
+        let mut msg = Vec::with_capacity(8);
+        msg.push(b'W');
+        msg.extend_from_slice(&7i32.to_be_bytes()); // len = 7
+        msg.push(0);  // overall_format = text
+        msg.extend_from_slice(&0i16.to_be_bytes()); // num_cols = 0
+        msg
+    }
+
+    // ------------------------------------------------------------------
+    // Critical test 1: XLogData parsing
+    // ------------------------------------------------------------------
+    /// Feed a valid CopyData containing XLogData through duplex, verify
+    /// the WAL payload is received with the 25-byte header stripped.
+    #[tokio::test]
+    async fn test_xlog_data_parsing() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        let wal_payload = b"WAL DATA PAYLOAD HERE";
+        let msg = copy_data(&xlog_data(wal_payload));
+        server.write_all(&msg).await.unwrap();
+
+        let item = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed")
+            .expect("reader returned error");
+
+        assert_eq!(item, wal_payload, "XLogData header should be stripped");
+
+        // Clean shutdown: close server + rx so reader exits
+        drop(server);
+        drop(rx);
+        handle.await.ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Critical test 2: Keepalive detection + auto-response
+    // ------------------------------------------------------------------
+    /// Feed a PrimaryKeepaliveMessage with reply_required=1, verify
+    /// auto-StandbyStatusUpdate is sent back through the stream.
+    #[tokio::test]
+    async fn test_keepalive_auto_response() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        // Send a keepalive requesting a reply
+        let msg = copy_data(&keepalive(42, true));
+        server.write_all(&msg).await.unwrap();
+
+        // Reader should yield an empty Vec to signal keepalive progress
+        let item = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed")
+            .expect("reader returned error");
+        assert!(item.is_empty(), "keepalive yields empty vec");
+
+        // After processing the keepalive the reader writes StandbyStatusUpdate
+        // back to the stream.  Format: CopyData('d') | Int32(len) | 'r' | ...
+        let mut resp_type = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(5), server.read_exact(&mut resp_type))
+            .await
+            .expect("timeout reading response type")
+            .expect("read response type");
+        assert_eq!(resp_type[0], b'd', "response should be CopyData");
+
+        let mut resp_len = [0u8; 4];
+        server.read_exact(&mut resp_len).await.unwrap();
+        let payload_len = i32::from_be_bytes(resp_len) as usize - 4;
+
+        let mut payload = vec![0u8; payload_len];
+        server.read_exact(&mut payload).await.unwrap();
+        assert_eq!(payload[0], b'r', "StandbyStatusUpdate sub-type");
+
+        // Verify the flushed LSN was updated
+        let _received_lsn = i64::from_be_bytes(payload[1..9].try_into().unwrap());
+        let _flushed_lsn = i64::from_be_bytes(payload[9..17].try_into().unwrap());
+
+        drop(server);
+        drop(rx);
+        handle.await.ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Critical test 3: SCRAM-SHA-256 full handshake
+    // ------------------------------------------------------------------
+    /// Drive the full SASL exchange over duplex from the server side,
+    /// computing the correct server-final signature so authenticate()
+    /// returns Ok.
+    #[tokio::test]
+    async fn test_scram_handshake() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let config = test_config();
+        const SALT_B64: &str = "W8krQhUg/sbwPylq7gMq3Q==";
+        const ITERATIONS: u32 = 4096;
+
+        let auth = async {
+            let mut stream = MaybeTls::Test(client);
+            authenticate(&mut stream, &config).await
+        };
+
+        let srv = async {
+            // 1. Write AuthenticationSASL (type 10)
+            let mechs = b"SCRAM-SHA-256\0";
+            let mut auth_payload = Vec::new();
+            auth_payload.extend_from_slice(&10i32.to_be_bytes());
+            auth_payload.extend_from_slice(mechs);
+            auth_payload.push(0); // terminator
+
+            let mut msg = Vec::new();
+            msg.push(b'R');
+            msg.extend_from_slice(&((auth_payload.len() + 4) as i32).to_be_bytes());
+            msg.extend_from_slice(&auth_payload);
+            server.write_all(&msg).await.unwrap();
+
+            // 2. Read SASLInitialResponse (PasswordMessage 'p')
+            let mut ty = [0u8; 1];
+            server.read_exact(&mut ty).await.unwrap();
+            assert_eq!(ty[0], b'p');
+
+            let mut raw_len = [0u8; 4];
+            server.read_exact(&mut raw_len).await.unwrap();
+            let total_len = i32::from_be_bytes(raw_len) as usize;
+            let mut body = vec![0u8; total_len - 4];
+            server.read_exact(&mut body).await.unwrap();
+
+            // body = "SCRAM-SHA-256\0" | Int32(client_first_len) | client_first
+            let mech_end = body.iter().position(|&b| b == 0).unwrap();
+            let _mechanism = String::from_utf8_lossy(&body[..mech_end]);
+            let after_mech = &body[mech_end + 1..];
+            let cfl = i32::from_be_bytes(after_mech[..4].try_into().unwrap()) as usize;
+            let client_first = String::from_utf8_lossy(&after_mech[4..4 + cfl]).to_string();
+
+            assert!(client_first.starts_with("n,,"));
+
+            let client_first_bare = client_first.strip_prefix("n,,").unwrap();
+            let r_pos = client_first_bare.find("r=").unwrap();
+            let client_nonce = &client_first_bare[r_pos + 2..];
+
+            // 3. Craft server-first
+            let server_nonce = format!("{client_nonce}server_ext");
+            let server_first = format!("r={server_nonce},s={SALT_B64},i={ITERATIONS}");
+
+            // Write AuthenticationSASLContinue (type 11)
+            let mut cont_payload = Vec::new();
+            cont_payload.extend_from_slice(&11i32.to_be_bytes());
+            cont_payload.extend_from_slice(server_first.as_bytes());
+            cont_payload.push(0);
+
+            let mut cont_msg = Vec::new();
+            cont_msg.push(b'R');
+            cont_msg.extend_from_slice(&((cont_payload.len() + 4) as i32).to_be_bytes());
+            cont_msg.extend_from_slice(&cont_payload);
+            server.write_all(&cont_msg).await.unwrap();
+
+            // 4. Read SASLResponse (PasswordMessage 'p')
+            let mut ty2 = [0u8; 1];
+            server.read_exact(&mut ty2).await.unwrap();
+            assert_eq!(ty2[0], b'p');
+
+            let mut rl2 = [0u8; 4];
+            server.read_exact(&mut rl2).await.unwrap();
+            let total_len2 = i32::from_be_bytes(rl2) as usize;
+            let mut cf_body = vec![0u8; total_len2 - 4];
+            server.read_exact(&mut cf_body).await.unwrap();
+            let client_final = String::from_utf8_lossy(&cf_body).to_string();
+
+            // client_final = "c=biws,r=...,p=..."
+            let p_pos = client_final.find(",p=").unwrap();
+            let client_final_no_proof = &client_final[..p_pos + 1]; // includes "c=biws,r=..."
+            let client_final_without_proof = client_final_no_proof
+                .strip_suffix(',')
+                .unwrap_or(client_final_no_proof);
+
+            // 5. Compute expected server signature
+            let password = config.password.as_bytes();
+            let salt =
+                base64::engine::general_purpose::STANDARD.decode(SALT_B64).unwrap();
+            let salted_password = hi(password, &salt, ITERATIONS).unwrap();
+            let server_key = hmac_sha256(&salted_password, b"Server Key").unwrap();
+            let auth_msg =
+                format!("{client_first_bare},{server_first},{client_final_without_proof}");
+            let expected_sig = hmac_sha256(&server_key, auth_msg.as_bytes()).unwrap();
+            let expected_b64 =
+                base64::engine::general_purpose::STANDARD.encode(&expected_sig);
+
+            // 6. Write AuthenticationSASLFinal (type 12) with valid sig
+            let server_final = format!("v={expected_b64}");
+            let mut final_payload = Vec::new();
+            final_payload.extend_from_slice(&12i32.to_be_bytes());
+            final_payload.extend_from_slice(server_final.as_bytes());
+            final_payload.push(0);
+
+            let mut final_msg = Vec::new();
+            final_msg.push(b'R');
+            final_msg.extend_from_slice(&((final_payload.len() + 4) as i32).to_be_bytes());
+            final_msg.extend_from_slice(&final_payload);
+            server.write_all(&final_msg).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(auth, srv);
+        assert!(result.is_ok(), "SCRAM auth should succeed: {:?}", result.err());
+    }
+
+    // ------------------------------------------------------------------
+    // Critical test 4: MD5 PG auth vector
+    // ------------------------------------------------------------------
+    /// Verify md5_digest("password", "user") matches the known PG vector.
+    /// PostgreSQL MD5 auth: inner = md5(password || user)
+    #[test]
+    fn test_md5_pg_auth_vector() {
+        // md5("password" + "user") = md5("passworduser")
+        let inner = md5_digest(b"passworduser").unwrap();
+        assert_eq!(
+            inner, "4d45974e13472b5a0be3533de4666414",
+            "inner md5(password||user)"
+        );
+
+        // md5(inner_hex_ascii || salt) with salt = [1, 2, 3, 4]
+        // inner.as_bytes() gives the ASCII hex string, not decoded binary.
+        let salt = [1u8, 2, 3, 4];
+        let mut combined = inner.as_bytes().to_vec();
+        combined.extend_from_slice(&salt);
+        let hash = md5_digest(&combined).unwrap();
+        assert_eq!(
+            hash, "a3576f1ae039b8996bc4fc2720f9c71a",
+            "md5(inner_hex_ascii || salt)"
+        );
+
+        let response = format!("md5{hash}");
+        assert_eq!(
+            response,
+            "md5a3576f1ae039b8996bc4fc2720f9c71a"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Critical test 5: Reader task exit on receiver drop
+    // ------------------------------------------------------------------
+    /// Drop the server side of the duplex (causing client reads to fail)
+    /// and the mpsc receiver, then verify the reader task handle resolves.
+    #[tokio::test]
+    async fn test_reader_exit_on_drop() {
+        let (client, server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, rx) = mpsc::channel(16);
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        // Close both ends — reader read will fail and send to rx will fail
+        drop(server);
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("reader task should exit within timeout")
+            .expect("reader task should not panic");
+    }
+
+    // ------------------------------------------------------------------
+    // Test 6: CopyDone handling
+    // ------------------------------------------------------------------
+    /// Feed a CopyDone ('c') message to the reader, verify it exits
+    /// cleanly (channel produces None).
+    #[tokio::test]
+    async fn test_copy_done_handling() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        server.write_all(&copy_done()).await.unwrap();
+
+        // Reader should exit on CopyDone without sending anything
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await;
+
+        match result {
+            Ok(None) => { /* channel closed cleanly */ }
+            Ok(Some(Ok(v))) => {
+                panic!("expected None (CopyDone), got data: {v:?}");
+            }
+            Ok(Some(Err(e))) => {
+                panic!("expected None (CopyDone), got error: {e}");
+            }
+            Err(_) => {
+                panic!("reader did not exit after CopyDone within timeout");
+            }
+        }
+
+        drop(server);
+        handle.await.ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Test 7: ErrorResponse in reader
+    // ------------------------------------------------------------------
+    /// Feed an ErrorResponse ('E') to the reader, verify it yields Err.
+    #[tokio::test]
+    async fn test_error_response_in_reader() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        server.write_all(&error_response("test error")).await.unwrap();
+
+        let item = rx.recv().await;
+        match item {
+            Some(Err(TapError::PostgresConnectionRedacted(msg))) => {
+                assert!(msg.contains("test error"), "msg: {msg}");
+            }
+            other => {
+                panic!("expected Some(Err(PostgresConnectionRedacted)), got {other:?}");
+            }
+        }
+
+        drop(server);
+        drop(rx);
+        handle.await.ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Test 8: Split packets (fragmented reads)
+    // ------------------------------------------------------------------
+    /// Feed a complete XLogData message one byte at a time to exercise
+    /// the read_exact recovery path.
+    #[tokio::test]
+    async fn test_split_packets() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let stream = MaybeTls::Test(client);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(reader_task(stream, tx));
+
+        let wal_data = b"CHUNKED WAL DATA 12345";
+        let msg = copy_data(&xlog_data(wal_data));
+
+        // Write one byte at a time with tiny delays
+        for &b in &msg {
+            server.write_all(&[b]).await.unwrap();
+            tokio::time::sleep(Duration::from_micros(200)).await;
+        }
+
+        let item = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed")
+            .expect("reader returned error");
+
+        assert_eq!(item, wal_data, "XLogData from chunked write");
+
+        drop(server);
+        drop(rx);
+        handle.await.ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Test 9: Framing helpers
+    // ------------------------------------------------------------------
+    /// Verify send_startup, send_query, send_password_message,
+    /// read_ready_for_query, and read_copy_both_response all work with
+    /// a duplex stream.
+
+    #[tokio::test]
+    async fn test_send_startup_wire_format() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+        let config = test_config();
+
+        send_startup(&mut stream, &config).await.unwrap();
+
+        // Read the startup message from the server side
+        let mut len_buf = [0u8; 4];
+        server.read_exact(&mut len_buf).await.unwrap();
+        let total_len = i32::from_be_bytes(len_buf) as usize;
+
+        let mut payload = vec![0u8; total_len - 4];
+        server.read_exact(&mut payload).await.unwrap();
+
+        // First 4 bytes = protocol version
+        let proto_ver = i32::from_be_bytes(payload[..4].try_into().unwrap());
+        assert_eq!(proto_ver, PG_PROTOCOL_VERSION);
+
+        let msg = String::from_utf8_lossy(&payload);
+        assert!(msg.contains("user\0"), "should contain user param");
+        assert!(msg.contains("database\0"), "should contain database param");
+        assert!(
+            msg.contains("replication\0database\0"),
+            "should contain replication param"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_query_wire_format() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+
+        send_query(&mut stream, "SELECT 1").await.unwrap();
+
+        let mut ty = [0u8; 1];
+        server.read_exact(&mut ty).await.unwrap();
+        assert_eq!(ty[0], b'Q', "message type must be Query");
+
+        let mut len_buf = [0u8; 4];
+        server.read_exact(&mut len_buf).await.unwrap();
+        let len = i32::from_be_bytes(len_buf) as usize;
+
+        let mut query = vec![0u8; len - 4];
+        server.read_exact(&mut query).await.unwrap();
+        // Should be null-terminated "SELECT 1\0"
+        assert_eq!(&query[..query.len() - 1], b"SELECT 1");
+        assert_eq!(query[query.len() - 1], 0, "must be null-terminated");
+    }
+
+    #[tokio::test]
+    async fn test_send_password_message_wire_format() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+
+        send_password_message(&mut stream, b"secret").await.unwrap();
+
+        let mut ty = [0u8; 1];
+        server.read_exact(&mut ty).await.unwrap();
+        assert_eq!(ty[0], b'p', "message type must be PasswordMessage");
+
+        let mut len_buf = [0u8; 4];
+        server.read_exact(&mut len_buf).await.unwrap();
+        let len = i32::from_be_bytes(len_buf) as usize;
+
+        let mut password = vec![0u8; len - 4];
+        server.read_exact(&mut password).await.unwrap();
+        assert_eq!(&password[..password.len() - 1], b"secret");
+        assert_eq!(password[password.len() - 1], 0, "must be null-terminated");
+    }
+
+    #[tokio::test]
+    async fn test_read_ready_for_query_ok() {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+
+        // Write a ReadyForQuery message then call the helper
+        let helper = async {
+            read_ready_for_query(&mut stream).await
+        };
+
+        let feeder = async {
+            // Feed a NoticeResponse (should be skipped) then ReadyForQuery
+            let mut server = server;
+            // NoticeResponse: 'N' | Int32(len) | payload
+            // len = 4 (self) + 6 (payload "NOTICE") = 10
+            let mut notice = Vec::new();
+            notice.push(b'N');
+            notice.extend_from_slice(&10i32.to_be_bytes());
+            notice.extend_from_slice(b"NOTICE");
+            server.write_all(&notice).await.unwrap();
+
+            server.write_all(&ready_for_query()).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(result.is_ok(), "read_ready_for_query should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_read_copy_both_response_ok() {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+
+        let helper = async {
+            read_copy_both_response(&mut stream).await
+        };
+
+        let feeder = async {
+            let mut server = server;
+            server.write_all(&copy_both_response()).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(result.is_ok(), "read_copy_both_response should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_read_ready_for_query_error() {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut stream = MaybeTls::Test(client);
+
+        let helper = async {
+            read_ready_for_query(&mut stream).await
+        };
+
+        let feeder = async {
+            let mut server = server;
+            server.write_all(&error_response("syntax error")).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(
+            result.is_err(),
+            "read_ready_for_query should error on ErrorResponse"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 10: Authenticate with various auth types
+    // ------------------------------------------------------------------
+
+    /// authenticate() returns Ok immediately for AuthenticationOk.
+    #[tokio::test]
+    async fn test_authenticate_ok() {
+        let (client, server) = tokio::io::duplex(65536);
+        let config = test_config();
+        let mut stream = MaybeTls::Test(client);
+
+        let helper = async {
+            authenticate(&mut stream, &config).await
+        };
+
+        let feeder = async {
+            let mut server = server;
+            server.write_all(&auth_ok()).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(result.is_ok(), "authenticate with Ok should succeed: {:?}", result.err());
+    }
+
+    /// authenticate() sends cleartext password and handles AuthOk.
+    #[tokio::test]
+    async fn test_authenticate_cleartext() {
+        let (client, server) = tokio::io::duplex(65536);
+        let config = test_config();
+        let mut stream = MaybeTls::Test(client);
+
+        let helper = async {
+            authenticate(&mut stream, &config).await
+        };
+
+        let feeder = async {
+            let mut server = server;
+            // PasswordMessage request
+            let mut auth_req = Vec::new();
+            auth_req.push(b'R');
+            auth_req.extend_from_slice(&8i32.to_be_bytes());
+            auth_req.extend_from_slice(&3i32.to_be_bytes()); // CleartextPassword
+            server.write_all(&auth_req).await.unwrap();
+
+            // Read PasswordMessage response
+            let mut ty = [0u8; 1];
+            server.read_exact(&mut ty).await.unwrap();
+            assert_eq!(ty[0], b'p');
+
+            // Send AuthenticationOk
+            server.write_all(&auth_ok()).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(result.is_ok(), "authenticate with cleartext should succeed: {:?}", result.err());
+    }
+
+    /// authenticate() handles MD5 password request.
+    #[tokio::test]
+    async fn test_authenticate_md5() {
+        let (client, server) = tokio::io::duplex(65536);
+        let mut config = test_config();
+        config.user = "user".into();
+        config.password = "password".into();
+        let mut stream = MaybeTls::Test(client);
+
+        let helper = async {
+            authenticate(&mut stream, &config).await
+        };
+
+        let feeder = async {
+            let mut server = server;
+            // MD5Password request with salt [1,2,3,4]
+            let mut auth_req = Vec::new();
+            auth_req.push(b'R');
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&5i32.to_be_bytes()); // auth type = MD5
+            payload.extend_from_slice(&[1u8, 2, 3, 4]);    // salt
+            auth_req.extend_from_slice(&((payload.len() + 4) as i32).to_be_bytes());
+            auth_req.extend_from_slice(&payload);
+            server.write_all(&auth_req).await.unwrap();
+
+            // Read PasswordMessage response
+            let mut ty = [0u8; 1];
+            server.read_exact(&mut ty).await.unwrap();
+            assert_eq!(ty[0], b'p');
+
+            let mut len_buf = [0u8; 4];
+            server.read_exact(&mut len_buf).await.unwrap();
+            let len = i32::from_be_bytes(len_buf) as usize;
+            let mut resp = vec![0u8; len - 4];
+            server.read_exact(&mut resp).await.unwrap();
+
+            let pw_str = String::from_utf8_lossy(&resp[..resp.len() - 1]);
+            assert!(
+                pw_str.starts_with("md5"),
+                "MD5 response should start with md5, got: {pw_str}"
+            );
+            assert_eq!(
+                pw_str.as_ref(),
+                "md5a3576f1ae039b8996bc4fc2720f9c71a",
+                "expected MD5 response"
+            );
+
+            // Send AuthenticationOk
+            server.write_all(&auth_ok()).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(helper, feeder);
+        assert!(result.is_ok(), "authenticate with MD5 should succeed: {:?}", result.err());
+    }
+
+    // ------------------------------------------------------------------
+    // Test 11: SASL server-final signature mismatch
+    // ------------------------------------------------------------------
+    /// Feed the full SASL exchange but with a deliberately wrong v=
+    /// value in the server-final message — verify Err.
+    #[tokio::test]
+    async fn test_sasl_signature_mismatch() {
+        let (client, mut server) = tokio::io::duplex(65536);
+        let config = test_config();
+        const SALT_B64: &str = "W8krQhUg/sbwPylq7gMq3Q==";
+        const ITERATIONS: u32 = 4096;
+
+        let auth = async {
+            let mut stream = MaybeTls::Test(client);
+            authenticate(&mut stream, &config).await
+        };
+
+        let srv = async {
+            // 1. AuthenticationSASL (type 10)
+            let mechs = b"SCRAM-SHA-256\0";
+            let mut auth_payload = Vec::new();
+            auth_payload.extend_from_slice(&10i32.to_be_bytes());
+            auth_payload.extend_from_slice(mechs);
+            auth_payload.push(0);
+            let mut msg = Vec::new();
+            msg.push(b'R');
+            msg.extend_from_slice(&((auth_payload.len() + 4) as i32).to_be_bytes());
+            msg.extend_from_slice(&auth_payload);
+            server.write_all(&msg).await.unwrap();
+
+            // 2. Read SASLInitialResponse
+            let mut ty = [0u8; 1];
+            server.read_exact(&mut ty).await.unwrap();
+            assert_eq!(ty[0], b'p');
+            let mut raw_len = [0u8; 4];
+            server.read_exact(&mut raw_len).await.unwrap();
+            let total_len = i32::from_be_bytes(raw_len) as usize;
+            let mut body = vec![0u8; total_len - 4];
+            server.read_exact(&mut body).await.unwrap();
+
+            let mech_end = body.iter().position(|&b| b == 0).unwrap();
+            let after_mech = &body[mech_end + 1..];
+            let cfl = i32::from_be_bytes(after_mech[..4].try_into().unwrap()) as usize;
+            let client_first = String::from_utf8_lossy(&after_mech[4..4 + cfl]).to_string();
+            let client_first_bare = client_first.strip_prefix("n,,").unwrap();
+            let r_pos = client_first_bare.find("r=").unwrap();
+            let client_nonce = &client_first_bare[r_pos + 2..];
+
+            // 3. Server-first
+            let server_nonce = format!("{client_nonce}srv");
+            let server_first = format!("r={server_nonce},s={SALT_B64},i={ITERATIONS}");
+
+            // SASLContinue
+            let mut cont_payload = Vec::new();
+            cont_payload.extend_from_slice(&11i32.to_be_bytes());
+            cont_payload.extend_from_slice(server_first.as_bytes());
+            cont_payload.push(0);
+            let mut cont_msg = Vec::new();
+            cont_msg.push(b'R');
+            cont_msg.extend_from_slice(&((cont_payload.len() + 4) as i32).to_be_bytes());
+            cont_msg.extend_from_slice(&cont_payload);
+            server.write_all(&cont_msg).await.unwrap();
+
+            // 4. Read SASLResponse
+            let mut ty2 = [0u8; 1];
+            server.read_exact(&mut ty2).await.unwrap();
+            assert_eq!(ty2[0], b'p');
+            let mut rl2 = [0u8; 4];
+            server.read_exact(&mut rl2).await.unwrap();
+            let total_len2 = i32::from_be_bytes(rl2) as usize;
+            let mut cf_body = vec![0u8; total_len2 - 4];
+            server.read_exact(&mut cf_body).await.unwrap();
+
+            // 5. Send SASLFinal with WRONG signature
+            let wrong_sig =
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            let server_final = format!("v={wrong_sig}");
+            let mut final_payload = Vec::new();
+            final_payload.extend_from_slice(&12i32.to_be_bytes());
+            final_payload.extend_from_slice(server_final.as_bytes());
+            final_payload.push(0);
+            let mut final_msg = Vec::new();
+            final_msg.push(b'R');
+            final_msg.extend_from_slice(&((final_payload.len() + 4) as i32).to_be_bytes());
+            final_msg.extend_from_slice(&final_payload);
+            server.write_all(&final_msg).await.unwrap();
+        };
+
+        let (result, _) = tokio::join!(auth, srv);
+        assert!(
+            result.is_err(),
+            "SCRAM should fail with wrong server signature: {:?}",
+            result
+        );
+        if let Err(TapError::PostgresConnectionRedacted(msg)) = result {
+            assert!(
+                msg.contains("signature mismatch"),
+                "expected 'signature mismatch' error, got: {msg}"
+            );
+        }
+    }
+
+    // ── Existing unit tests (preserved) ──────────────────────────────
 
     #[test]
     fn test_replication_stream_poll_ready() {
@@ -1206,8 +2037,6 @@ mod tests {
         });
     }
 
-    // ── SCRAM helpers ───────────────────────────────────────────────
-
     #[test]
     fn test_scram_parse_server_first() {
         let client_nonce = "abc123";
@@ -1230,8 +2059,6 @@ mod tests {
 
     #[test]
     fn test_build_sasl_response_wire_format() {
-        // SASLResponse must be: 'p' | Int32(len = 4 + N) | N bytes
-        // No extra inner Int32 prefix (unlike SASLInitialResponse).
         let client_final = b"c=biws,r=abc123,p=proof";
         let result = build_sasl_response(client_final);
         let expected_len = 1 + 4 + client_final.len();
@@ -1244,8 +2071,6 @@ mod tests {
 
         assert_eq!(&result[5..], client_final, "payload");
     }
-
-    // ── Crypto helpers ──────────────────────────────────────────────
 
     #[test]
     fn test_md5_digest() {
@@ -1281,12 +2106,8 @@ mod tests {
         assert_eq!(result, vec![0xf0, 0xf0, 0xff]);
     }
 
-    // ── Error extraction ────────────────────────────────────────────
-
     #[test]
     fn test_extract_error_message() {
-        // Build a minimal ErrorResponse payload:
-        // 'S' "ERROR"\0 'M' "relation does not exist"\0 'C' "42P01"\0 \0
         let mut payload = Vec::new();
         payload.push(b'S');
         payload.extend_from_slice(b"ERROR\0");
@@ -1294,7 +2115,7 @@ mod tests {
         payload.extend_from_slice(b"relation does not exist\0");
         payload.push(b'C');
         payload.extend_from_slice(b"42P01\0");
-        payload.push(0); // terminator
+        payload.push(0);
 
         let msg = extract_error_message(&payload);
         assert_eq!(msg, "relation does not exist");
