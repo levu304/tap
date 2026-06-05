@@ -487,166 +487,9 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                 send_password_message(stream, response.as_bytes()).await?;
             }
             10 => {
-                // AuthenticationSASL
+                // AuthenticationSASL — delegate to extracted function
                 debug!("auth: SASL requested");
-                let mechanisms = read_sasl_mechanisms(stream).await?;
-                // Prefer SCRAM-SHA-256. If the server only offers
-                // SCRAM-SHA-256-PLUS, reject — we don't support channel binding.
-                if mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
-                    // Proceed with SCRAM-SHA-256 below
-                } else if mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS") {
-                    return Err(TapError::PostgresConnectionRedacted(
-                        "server requires SCRAM-SHA-256-PLUS (channel binding), \
-                         but this client does not support it"
-                            .into(),
-                    ));
-                } else {
-                    return Err(TapError::PostgresConnectionRedacted(
-                        "no supported SASL mechanism found (need SCRAM-SHA-256)".into(),
-                    ));
-                }
-
-                let password = config.password.as_bytes();
-                let client_nonce = generate_nonce();
-                let client_first_bare =
-                    format!("n={},r={}", scram_client_first_bare(config), client_nonce);
-                let client_first = String::from("n,,") + &client_first_bare;
-                let client_first_bytes = client_first.as_bytes();
-                let client_first_len = client_first_bytes.len() as i32;
-
-                // SASLInitialResponse
-                let mechanism = b"SCRAM-SHA-256";
-                let mut sasl_resp = Vec::new();
-                sasl_resp.extend_from_slice(mechanism);
-                sasl_resp.push(0); // null-terminated mechanism
-                sasl_resp.extend_from_slice(&client_first_len.to_be_bytes());
-                sasl_resp.extend_from_slice(client_first_bytes);
-
-                let mut pw_msg = Vec::new();
-                pw_msg.push(b'p');
-                pw_msg.extend_from_slice(&(sasl_resp.len() as i32 + 4).to_be_bytes());
-                pw_msg.extend_from_slice(&sasl_resp);
-                stream.write_all(&pw_msg).await.map_err(wrap_io_err)?;
-                stream.flush().await.map_err(wrap_io_err)?;
-
-                // Read AuthenticationSASLContinue (type 11)
-                let msg_type = read_u8(stream).await?;
-                if msg_type != TYPE_AUTHENTICATION {
-                    return Err(proto_err(format!(
-                        "expected SASLContinue ('R'), got 0x{msg_type:02x}"
-                    )));
-                }
-                let _len = read_i32(stream).await?;
-                if _len < 8 {
-                    return Err(proto_err(format!(
-                        "SASLContinue message too short: {_len} bytes (need at least 8)"
-                    )));
-                }
-                let sasl_type = read_i32(stream).await?;
-                if sasl_type != 11 {
-                    return Err(proto_err(format!(
-                        "expected SASLContinue (type 11), got {sasl_type}"
-                    )));
-                }
-
-                let server_first = read_string_to_nul(stream).await?;
-                debug!("SCRAM server-first: {server_first}");
-
-                // Parse server-first
-                let (salt_b64, iterations, server_nonce) =
-                    parse_scram_server_first(&server_first, &client_nonce)?;
-
-                // Compute client-final
-                let client_final_without_proof = format!("c=biws,r={server_nonce}");
-                let auth_message =
-                    format!("{client_first_bare},{server_first},{client_final_without_proof}");
-
-                let salted_password = hi(
-                    password,
-                    &base64::engine::general_purpose::STANDARD
-                        .decode(&salt_b64)
-                        .map_err(|e| TapError::Decode(format!("invalid SCRAM salt base64: {e}")))?,
-                    iterations,
-                )?;
-                let client_key = hmac_sha256(&salted_password, b"Client Key")?;
-                let stored_key = sha256(&client_key)?;
-                let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
-                let client_proof = xor_bytes(&client_key, &client_signature);
-                let client_proof_b64 =
-                    base64::engine::general_purpose::STANDARD.encode(&client_proof);
-
-                let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
-                let client_final_bytes = client_final.as_bytes();
-
-                // Send SASLResponse (type 'p')
-                // Format: 'p' | Int32 len | ByteN client-final-message
-                // Per the PostgreSQL protocol, SASLResponse is a plain
-                // PasswordMessage containing just the client-final bytes —
-                // no extra inner length prefix (unlike SASLInitialResponse).
-                let resp = build_sasl_response(client_final_bytes);
-
-                stream.write_all(&resp).await.map_err(wrap_io_err)?;
-                stream.flush().await.map_err(wrap_io_err)?;
-
-                // Read AuthenticationSASLFinal (type 12) or AuthenticationOk
-                let msg_type = read_u8(stream).await?;
-                if msg_type != TYPE_AUTHENTICATION {
-                    return Err(proto_err(format!(
-                        "expected SASLFinal/Ok ('R'), got 0x{msg_type:02x}"
-                    )));
-                }
-                let _len = read_i32(stream).await?;
-                if _len < 8 {
-                    return Err(proto_err(format!(
-                        "SASLFinal message too short: {_len} bytes (need at least 8)"
-                    )));
-                }
-                let sasl_type = read_i32(stream).await?;
-                match sasl_type {
-                    0 => {
-                        debug!("SASL authentication ok (after final)");
-                        return Ok(());
-                    }
-                    12 => {
-                        let server_final = read_string_to_nul(stream).await?;
-                        debug!("SASL server-final received");
-                        // RFC 5802 §5: server-final is either
-                        //   v=base64sig   (success)
-                        //   e=errorcode   (failure)
-                        if let Some(err) = server_final.strip_prefix("e=") {
-                            return Err(TapError::PostgresConnectionRedacted(format!(
-                                "SCRAM authentication failed: {err}"
-                            )));
-                        }
-                        if let Some(sig_b64) = server_final.strip_prefix("v=") {
-                            let server_key = hmac_sha256(&salted_password, b"Server Key")?;
-                            let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes())?;
-                            let expected_b64 =
-                                base64::engine::general_purpose::STANDARD.encode(&expected_sig);
-                            // Constant-time compare would be ideal, but string
-                            // comparison is acceptable here since this is a
-                            // local TLS connection over a Postgres replication
-                            // slot, not a latency-sensitive public endpoint.
-                            if sig_b64 != expected_b64 {
-                                return Err(TapError::PostgresConnectionRedacted(
-                                    "SCRAM server signature mismatch".into(),
-                                ));
-                            }
-                            debug!("SCRAM server signature verified");
-                        } else {
-                            // No v= or e= prefix — unexpected format
-                            return Err(TapError::Decode(format!(
-                                "unexpected SCRAM server-final format: {server_final}"
-                            )));
-                        }
-                        return Ok(());
-                    }
-                    other => {
-                        return Err(proto_err(format!(
-                            "expected SASLFinal (12) or Ok (0), got {other}"
-                        )));
-                    }
-                }
+                return perform_scram_auth(stream, config).await;
             }
             other => {
                 return Err(TapError::PostgresConnectionRedacted(format!(
@@ -751,6 +594,153 @@ async fn read_copy_both_response(stream: &mut MaybeTls) -> Result<(), TapError> 
     }
 }
 
+/// Process a single CopyData payload from the replication stream.
+///
+/// Parses XLogData frames (extracting WAL data), handles Keepalive messages
+/// (auto-replying when `reply_required` is set), and forwards data through
+/// the channel.
+///
+/// Returns `true` to continue the reader loop, `false` to exit.
+async fn parse_copy_data_payload(
+    stream: &mut MaybeTls,
+    tx: &mpsc::Sender<Result<Vec<u8>, TapError>>,
+    current_lsn: &Arc<AtomicI64>,
+    last_received_lsn: &mut i64,
+    last_flushed_lsn: &mut i64,
+    last_keepalive_time: &mut tokio::time::Instant,
+) -> bool {
+    let raw_len = match read_i32(stream).await {
+        Ok(l) => {
+            if l < 4 {
+                let _ = tx
+                    .send(Err(TapError::Decode(format!(
+                        "negative CopyData length: {l}"
+                    ))))
+                    .await;
+                return false;
+            }
+            l as usize
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+            return false;
+        }
+    };
+    let payload_len = raw_len - 4;
+    if payload_len > MAX_MESSAGE_SIZE {
+        let _ = tx
+            .send(Err(TapError::Decode(format!(
+                "CopyData payload too large: {payload_len} bytes"
+            ))))
+            .await;
+        return false;
+    }
+
+    let mut payload = vec![0u8; payload_len];
+    if let Err(e) = stream.read_exact(&mut payload).await {
+        let _ = tx.send(Err(wrap_io_err(e))).await;
+        return false;
+    }
+
+    if payload.is_empty() {
+        debug!("empty CopyData payload (possible keepalive)");
+        // Send empty slot to keep the stream alive
+        let _ = tx.send(Ok(Vec::new())).await;
+        return true;
+    }
+
+    let sub_type = payload[0];
+    match sub_type {
+        SUBTYPE_XLOG_DATA => {
+            // XLogData: Byte1 'w' | Int64 start_lsn | Int64 end_lsn
+            //           | Int64 timestamp | Byte[n] data
+            if payload.len() < XLOG_DATA_HEADER_SIZE {
+                let _ = tx
+                    .send(Err(TapError::Decode(format!(
+                        "truncated XLogData: {} bytes",
+                        payload.len()
+                    ))))
+                    .await;
+                return false;
+            }
+            // SAFETY: payload.len() >= 25 is checked above
+            let start_lsn_arr: [u8; 8] =
+                payload[1..9].try_into().expect("XLogData size validated");
+            let end_lsn_arr: [u8; 8] =
+                payload[9..17].try_into().expect("XLogData size validated");
+            let ts_arr: [u8; 8] = payload[17..XLOG_DATA_HEADER_SIZE]
+                .try_into()
+                .expect("XLogData size validated");
+            let _start_lsn = i64::from_be_bytes(start_lsn_arr);
+            let end_lsn = i64::from_be_bytes(end_lsn_arr);
+            let _timestamp = i64::from_be_bytes(ts_arr);
+
+            *last_received_lsn = end_lsn;
+            current_lsn.store(end_lsn, Ordering::Release);
+
+            // Yield the actual WAL data (after the XLogData header)
+            let wal_data = payload[XLOG_DATA_HEADER_SIZE..].to_vec();
+            if !wal_data.is_empty() && tx.send(Ok(wal_data)).await.is_err() {
+                // Receiver dropped
+                return false;
+            }
+            // Even if empty, the stream is alive
+        }
+        SUBTYPE_KEEPALIVE => {
+            // Keepalive: Byte1 'k' | Int64 end_lsn | Int64 ts
+            //            | Byte1 reply_required
+            if payload.len() < KEEPALIVE_HEADER_SIZE {
+                debug!("truncated Keepalive message, skipping");
+                return true;
+            }
+            // SAFETY: payload.len() >= 18 is checked above
+            let wal_end_arr: [u8; 8] =
+                payload[1..9].try_into().expect("Keepalive size validated");
+            let _ts_arr: [u8; 8] =
+                payload[9..17].try_into().expect("Keepalive size validated");
+            let wal_end = i64::from_be_bytes(wal_end_arr);
+            let _ts = i64::from_be_bytes(_ts_arr);
+            let reply_required =
+                payload.len() >= KEEPALIVE_HEADER_SIZE && payload[17] != 0;
+
+            *last_flushed_lsn = (*last_flushed_lsn).max(wal_end);
+            *last_received_lsn = (*last_received_lsn).max(wal_end);
+            current_lsn.store(*last_received_lsn, Ordering::Release);
+
+            if reply_required {
+                debug!("sending standby status update (keepalive requested)");
+                if let Err(e) = send_standby_status_update(
+                    stream,
+                    *last_received_lsn,
+                    *last_flushed_lsn,
+                    *last_received_lsn,
+                )
+                .await
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return false;
+                }
+                *last_keepalive_time = tokio::time::Instant::now();
+            }
+
+            // Yield an empty Vec to allow the stream consumer
+            // to observe progress
+            let _ = tx.send(Ok(Vec::new())).await;
+        }
+        SUBTYPE_STANDBY_STATUS_UPDATE => {
+            // StandbyStatusUpdate (echoed back by server) — skip
+            debug!("received standby status update echo");
+        }
+        other => {
+            debug!(
+                "unknown CopyData sub-type 0x{other:02x}, skipping {} bytes",
+                payload_len
+            );
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Background reader task
 // ---------------------------------------------------------------------------
@@ -796,128 +786,17 @@ async fn reader_task(
 
         match msg_type {
             TYPE_COPY_DATA => {
-                // CopyData
-                let raw_len = match read_i32(&mut stream).await {
-                    Ok(l) => {
-                        if l < 4 {
-                            let _ = tx
-                                .send(Err(TapError::Decode(format!(
-                                    "negative CopyData length: {l}"
-                                ))))
-                                .await;
-                            return;
-                        }
-                        l as usize
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                };
-                let payload_len = raw_len - 4;
-                if payload_len > MAX_MESSAGE_SIZE {
-                    let _ = tx
-                        .send(Err(TapError::Decode(format!(
-                            "CopyData payload too large: {payload_len} bytes"
-                        ))))
-                        .await;
+                if !parse_copy_data_payload(
+                    &mut stream,
+                    &tx,
+                    &current_lsn,
+                    &mut last_received_lsn,
+                    &mut last_flushed_lsn,
+                    &mut last_keepalive_time,
+                )
+                .await
+                {
                     return;
-                }
-
-                let mut payload = vec![0u8; payload_len];
-                if let Err(e) = stream.read_exact(&mut payload).await {
-                    let _ = tx.send(Err(wrap_io_err(e))).await;
-                    return;
-                }
-
-                if payload.is_empty() {
-                    debug!("empty CopyData payload (possible keepalive)");
-                    // Send empty slot to keep the stream alive
-                    let _ = tx.send(Ok(Vec::new())).await;
-                    continue;
-                }
-
-                let sub_type = payload[0];
-                match sub_type {
-                    SUBTYPE_XLOG_DATA => {
-                        // XLogData: Byte1 'w' | Int64 start_lsn | Int64 end_lsn
-                        //           | Int64 timestamp | Byte[n] data
-                        if payload.len() < XLOG_DATA_HEADER_SIZE {
-                            let _ = tx
-                                .send(Err(TapError::Decode(format!(
-                                    "truncated XLogData: {} bytes",
-                                    payload.len()
-                                ))))
-                                .await;
-                            return;
-                        }
-                        // SAFETY: payload.len() >= 25 is checked above
-                        let start_lsn_arr: [u8; 8] = payload[1..9].try_into().expect("XLogData size validated");
-                        let end_lsn_arr: [u8; 8] = payload[9..17].try_into().expect("XLogData size validated");
-                        let ts_arr: [u8; 8] = payload[17..XLOG_DATA_HEADER_SIZE].try_into().expect("XLogData size validated");
-                        let _start_lsn = i64::from_be_bytes(start_lsn_arr);
-                        let end_lsn = i64::from_be_bytes(end_lsn_arr);
-                        let _timestamp = i64::from_be_bytes(ts_arr);
-
-                        last_received_lsn = end_lsn;
-                        current_lsn.store(end_lsn, Ordering::Release);
-
-                        // Yield the actual WAL data (after the XLogData header)
-                        let wal_data = payload[XLOG_DATA_HEADER_SIZE..].to_vec();
-                        if !wal_data.is_empty() && tx.send(Ok(wal_data)).await.is_err() {
-                            // Receiver dropped
-                            return;
-                        }
-                        // Even if empty, the stream is alive
-                    }
-                    SUBTYPE_KEEPALIVE => {
-                        // Keepalive: Byte1 'k' | Int64 end_lsn | Int64 ts
-                        //            | Byte1 reply_required
-                        if payload.len() < KEEPALIVE_HEADER_SIZE {
-                            debug!("truncated Keepalive message, skipping");
-                            continue;
-                        }
-                        // SAFETY: payload.len() >= 18 is checked above
-                        let wal_end_arr: [u8; 8] = payload[1..9].try_into().expect("Keepalive size validated");
-                        let _ts_arr: [u8; 8] = payload[9..17].try_into().expect("Keepalive size validated");
-                        let wal_end = i64::from_be_bytes(wal_end_arr);
-                        let _ts = i64::from_be_bytes(_ts_arr);
-                        let reply_required = payload.len() >= KEEPALIVE_HEADER_SIZE && payload[17] != 0;
-
-                        last_flushed_lsn = last_flushed_lsn.max(wal_end);
-                        last_received_lsn = last_received_lsn.max(wal_end);
-                        current_lsn.store(last_received_lsn, Ordering::Release);
-
-                        if reply_required {
-                            debug!("sending standby status update (keepalive requested)");
-                            if let Err(e) = send_standby_status_update(
-                                &mut stream,
-                                last_received_lsn,
-                                last_flushed_lsn,
-                                last_received_lsn,
-                            )
-                            .await
-                            {
-                                let _ = tx.send(Err(e)).await;
-                                return;
-                            }
-                            last_keepalive_time = tokio::time::Instant::now();
-                        }
-
-                        // Yield an empty Vec to allow the stream consumer
-                        // to observe progress
-                        let _ = tx.send(Ok(Vec::new())).await;
-                    }
-                    SUBTYPE_STANDBY_STATUS_UPDATE => {
-                        // StandbyStatusUpdate (echoed back by server) — skip
-                        debug!("received standby status update echo");
-                    }
-                    other => {
-                        debug!(
-                            "unknown CopyData sub-type 0x{other:02x}, skipping {} bytes",
-                            payload_len
-                        );
-                    }
                 }
             }
             TYPE_COPY_DONE => {
@@ -1270,6 +1149,182 @@ fn build_sasl_response(client_final: &[u8]) -> Vec<u8> {
     resp.extend_from_slice(&len.to_be_bytes());
     resp.extend_from_slice(client_final);
     resp
+}
+
+/// Perform the SCRAM-SHA-256 authentication exchange.
+///
+/// Called when the server sends AuthenticationSASL (type 10).  Handles the
+/// full multi-message SASL exchange:
+///
+/// 1. Reads SASL mechanisms from the server
+/// 2. Sends SASLInitialResponse with client-first-message
+/// 3. Reads SASLContinue (type 11) with server-first-message
+/// 4. Computes client proof via PBKDF2-HMAC-SHA256
+/// 5. Sends SASLResponse with client-final-message
+/// 6. Reads SASLFinal (type 12) or AuthenticationOk (type 0)
+/// 7. Verifies server signature
+async fn perform_scram_auth(
+    stream: &mut MaybeTls,
+    config: &SourceConfig,
+) -> Result<(), TapError> {
+    let mechanisms = read_sasl_mechanisms(stream).await?;
+    // Prefer SCRAM-SHA-256. If the server only offers
+    // SCRAM-SHA-256-PLUS, reject — we don't support channel binding.
+    if mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
+        // Proceed with SCRAM-SHA-256 below
+    } else if mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS") {
+        return Err(TapError::PostgresConnectionRedacted(
+            "server requires SCRAM-SHA-256-PLUS (channel binding), \
+             but this client does not support it"
+                .into(),
+        ));
+    } else {
+        return Err(TapError::PostgresConnectionRedacted(
+            "no supported SASL mechanism found (need SCRAM-SHA-256)".into(),
+        ));
+    }
+
+    let password = config.password.as_bytes();
+    let client_nonce = generate_nonce();
+    let client_first_bare =
+        format!("n={},r={}", scram_client_first_bare(config), client_nonce);
+    let client_first = String::from("n,,") + &client_first_bare;
+    let client_first_bytes = client_first.as_bytes();
+    let client_first_len = client_first_bytes.len() as i32;
+
+    // SASLInitialResponse
+    let mechanism = b"SCRAM-SHA-256";
+    let mut sasl_resp = Vec::new();
+    sasl_resp.extend_from_slice(mechanism);
+    sasl_resp.push(0); // null-terminated mechanism
+    sasl_resp.extend_from_slice(&client_first_len.to_be_bytes());
+    sasl_resp.extend_from_slice(client_first_bytes);
+
+    let mut pw_msg = Vec::new();
+    pw_msg.push(b'p');
+    pw_msg.extend_from_slice(&(sasl_resp.len() as i32 + 4).to_be_bytes());
+    pw_msg.extend_from_slice(&sasl_resp);
+    stream.write_all(&pw_msg).await.map_err(wrap_io_err)?;
+    stream.flush().await.map_err(wrap_io_err)?;
+
+    // Read AuthenticationSASLContinue (type 11)
+    let msg_type = read_u8(stream).await?;
+    if msg_type != TYPE_AUTHENTICATION {
+        return Err(proto_err(format!(
+            "expected SASLContinue ('R'), got 0x{msg_type:02x}"
+        )));
+    }
+    let _len = read_i32(stream).await?;
+    if _len < 8 {
+        return Err(proto_err(format!(
+            "SASLContinue message too short: {_len} bytes (need at least 8)"
+        )));
+    }
+    let sasl_type = read_i32(stream).await?;
+    if sasl_type != 11 {
+        return Err(proto_err(format!(
+            "expected SASLContinue (type 11), got {sasl_type}"
+        )));
+    }
+
+    let server_first = read_string_to_nul(stream).await?;
+    debug!("SCRAM server-first: {server_first}");
+
+    // Parse server-first
+    let (salt_b64, iterations, server_nonce) =
+        parse_scram_server_first(&server_first, &client_nonce)?;
+
+    // Compute client-final
+    let client_final_without_proof = format!("c=biws,r={server_nonce}");
+    let auth_message =
+        format!("{client_first_bare},{server_first},{client_final_without_proof}");
+
+    let salted_password = hi(
+        password,
+        &base64::engine::general_purpose::STANDARD
+            .decode(&salt_b64)
+            .map_err(|e| TapError::Decode(format!("invalid SCRAM salt base64: {e}")))?,
+        iterations,
+    )?;
+    let client_key = hmac_sha256(&salted_password, b"Client Key")?;
+    let stored_key = sha256(&client_key)?;
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
+    let client_proof = xor_bytes(&client_key, &client_signature);
+    let client_proof_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&client_proof);
+
+    let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
+    let client_final_bytes = client_final.as_bytes();
+
+    // Send SASLResponse (type 'p')
+    // Format: 'p' | Int32 len | ByteN client-final-message
+    // Per the PostgreSQL protocol, SASLResponse is a plain
+    // PasswordMessage containing just the client-final bytes —
+    // no extra inner length prefix (unlike SASLInitialResponse).
+    let resp = build_sasl_response(client_final_bytes);
+
+    stream.write_all(&resp).await.map_err(wrap_io_err)?;
+    stream.flush().await.map_err(wrap_io_err)?;
+
+    // Read AuthenticationSASLFinal (type 12) or AuthenticationOk
+    let msg_type = read_u8(stream).await?;
+    if msg_type != TYPE_AUTHENTICATION {
+        return Err(proto_err(format!(
+            "expected SASLFinal/Ok ('R'), got 0x{msg_type:02x}"
+        )));
+    }
+    let _len = read_i32(stream).await?;
+    if _len < 8 {
+        return Err(proto_err(format!(
+            "SASLFinal message too short: {_len} bytes (need at least 8)"
+        )));
+    }
+    let sasl_type = read_i32(stream).await?;
+    match sasl_type {
+        0 => {
+            debug!("SASL authentication ok (after final)");
+            return Ok(());
+        }
+        12 => {
+            let server_final = read_string_to_nul(stream).await?;
+            debug!("SASL server-final received");
+            // RFC 5802 §5: server-final is either
+            //   v=base64sig   (success)
+            //   e=errorcode   (failure)
+            if let Some(err) = server_final.strip_prefix("e=") {
+                return Err(TapError::PostgresConnectionRedacted(format!(
+                    "SCRAM authentication failed: {err}"
+                )));
+            }
+            if let Some(sig_b64) = server_final.strip_prefix("v=") {
+                let server_key = hmac_sha256(&salted_password, b"Server Key")?;
+                let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes())?;
+                let expected_b64 =
+                    base64::engine::general_purpose::STANDARD.encode(&expected_sig);
+                // Constant-time compare would be ideal, but string
+                // comparison is acceptable here since this is a
+                // local TLS connection over a Postgres replication
+                // slot, not a latency-sensitive public endpoint.
+                if sig_b64 != expected_b64 {
+                    return Err(TapError::PostgresConnectionRedacted(
+                        "SCRAM server signature mismatch".into(),
+                    ));
+                }
+                debug!("SCRAM server signature verified");
+            } else {
+                // No v= or e= prefix — unexpected format
+                return Err(TapError::Decode(format!(
+                    "unexpected SCRAM server-final format: {server_final}"
+                )));
+            }
+            return Ok(());
+        }
+        other => {
+            return Err(proto_err(format!(
+                "expected SASLFinal (12) or Ok (0), got {other}"
+            )));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
