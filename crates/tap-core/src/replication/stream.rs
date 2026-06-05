@@ -444,7 +444,10 @@ pub(crate) async fn reader_task(
                         return;
                     }
                 };
-                let _ = skip_bytes(&mut stream, len.saturating_sub(4)).await;
+                if let Err(e) = skip_bytes(&mut stream, len.saturating_sub(4)).await {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
             }
         }
 
