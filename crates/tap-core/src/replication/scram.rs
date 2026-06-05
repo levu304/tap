@@ -1,6 +1,6 @@
 use super::{
     MaybeTls, SourceConfig, TYPE_AUTHENTICATION, TapError, build_sasl_response, proto_err,
-    read_i32, read_sasl_mechanisms, read_string_to_nul, read_u8, wrap_io_err,
+    read_i32, read_sasl_mechanisms, read_string_to_nul_bounded, read_u8, wrap_io_err,
 };
 use base64::Engine;
 use tokio::io::AsyncWriteExt;
@@ -192,10 +192,10 @@ pub(crate) async fn perform_scram_auth(
             "expected SASLContinue ('R'), got 0x{msg_type:02x}"
         )));
     }
-    let _len = read_i32(stream).await?;
-    if _len < 8 {
+    let len = read_i32(stream).await?;
+    if len < 8 {
         return Err(proto_err(format!(
-            "SASLContinue message too short: {_len} bytes (need at least 8)"
+            "SASLContinue message too short: {len} bytes (need at least 8)"
         )));
     }
     let sasl_type = read_i32(stream).await?;
@@ -205,7 +205,7 @@ pub(crate) async fn perform_scram_auth(
         )));
     }
 
-    let server_first = read_string_to_nul(stream).await?;
+    let server_first = read_string_to_nul_bounded(stream, (len - 8) as usize).await?;
     debug!("SCRAM server-first: {server_first}");
 
     let (salt_b64, iterations, server_nonce) =
@@ -242,10 +242,10 @@ pub(crate) async fn perform_scram_auth(
             "expected SASLFinal/Ok ('R'), got 0x{msg_type:02x}"
         )));
     }
-    let _len = read_i32(stream).await?;
-    if _len < 8 {
+    let len = read_i32(stream).await?;
+    if len < 8 {
         return Err(proto_err(format!(
-            "SASLFinal message too short: {_len} bytes (need at least 8)"
+            "SASLFinal message too short: {len} bytes (need at least 8)"
         )));
     }
     let sasl_type = read_i32(stream).await?;
@@ -255,7 +255,7 @@ pub(crate) async fn perform_scram_auth(
             Ok(())
         }
         12 => {
-            let server_final = read_string_to_nul(stream).await?;
+            let server_final = read_string_to_nul_bounded(stream, (len - 8) as usize).await?;
             debug!("SASL server-final received");
             if let Some(err) = server_final.strip_prefix("e=") {
                 return Err(TapError::PostgresConnectionRedacted(format!(

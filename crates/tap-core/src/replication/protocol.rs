@@ -177,6 +177,31 @@ pub(crate) async fn read_string_to_nul(stream: &mut MaybeTls) -> Result<String, 
         .map_err(|e| TapError::Decode(format!("invalid UTF-8 in wire message: {e}")))
 }
 
+/// Read a NUL-terminated string from the stream, consuming at most
+/// `max_bytes` bytes.  Prevents unbounded reads and protocol desync
+/// when the peer sends an empty or minimal payload.
+///
+/// If the NUL byte is found within `max_bytes`, returns the string
+/// before the NUL.  If no NUL is found within `max_bytes`, returns
+/// an error — this prevents consuming bytes from the next wire message.
+pub(crate) async fn read_string_to_nul_bounded(
+    stream: &mut MaybeTls,
+    max_bytes: usize,
+) -> Result<String, TapError> {
+    if max_bytes == 0 {
+        return Ok(String::new());
+    }
+    let mut buf = vec![0u8; max_bytes];
+    tokio::io::AsyncReadExt::read_exact(stream, &mut buf)
+        .await
+        .map_err(wrap_io_err)?;
+
+    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(max_bytes);
+    let bytes = &buf[..nul_pos];
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| TapError::Decode(format!("invalid UTF-8 in wire message: {e}")))
+}
+
 /// Read an ErrorResponse ('E') message and return structured error information.
 pub(crate) async fn read_error_response(stream: &mut MaybeTls) -> Result<ErrorInfo, TapError> {
     let len = read_i32(stream).await?;
