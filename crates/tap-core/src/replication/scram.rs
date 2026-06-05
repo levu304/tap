@@ -252,7 +252,7 @@ pub(crate) async fn perform_scram_auth(
     match sasl_type {
         0 => {
             debug!("SASL authentication ok (after final)");
-            return Ok(());
+            Ok(())
         }
         12 => {
             let server_final = read_string_to_nul(stream).await?;
@@ -277,12 +277,12 @@ pub(crate) async fn perform_scram_auth(
                     "unexpected SCRAM server-final format: {server_final}"
                 )));
             }
-            return Ok(());
+            Ok(())
         }
         other => {
-            return Err(proto_err(format!(
+            Err(proto_err(format!(
                 "expected SASLFinal (12) or Ok (0), got {other}"
-            )));
+            )))
         }
     }
 }
