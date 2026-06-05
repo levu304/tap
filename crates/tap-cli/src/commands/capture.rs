@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Args;
+use futures::StreamExt;
 use tap_core::error::TapError;
 use tap_core::event::ChangeEvent;
 use tap_core::postgres::{Lsn, PgConnection, connect_plain};
+use tap_core::postgres::create_decoder;
 use tap_core::snapshot::SnapshotRunner;
 use tap_core::sse::{SseEvent, SseEventType, SseServer};
 use tap_core::state::StateStore;
@@ -235,7 +237,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         }
     }
 
-    // ── 9. Start replication stream (stub in v0.1.0) ────────────────
+    // ── 9. Start replication stream ──────────────────────────────────
     debug_assert!(
         start_lsn.is_some() || !config.capture.snapshot,
         "snapshot ran but start_lsn is still None"
@@ -245,7 +247,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         Lsn::ZERO
     });
     info!("Starting replication from LSN {replication_start}");
-    let _replication_stream = pg
+    let mut replication_stream = pg
         .start_replication(
             &config.source.slot_name,
             &config.source.publication,
@@ -258,6 +260,10 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         "Replication stream active (slot={})",
         config.source.slot_name
     );
+
+    // Create WAL decoder based on configured plugin
+    let mut decoder = create_decoder(&config.source.plugin, &config.source.dbname)
+        .map_err(|e| TapError::Decode(format!("Failed to create decoder: {e}")))?;
 
     // ── 10. Main event loop ──────────────────────────────────────────
     info!("Capture running — waiting for events (SSE on port {port})");
@@ -309,6 +315,67 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                 );
                 // Flush stdout manually (no newline)
                 let _ = std::io::stdout().flush();
+            }
+
+            // Replication stream: consume WAL, decode, forward, checkpoint
+            result = replication_stream.next() => {
+                let wal_bytes = match result {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => {
+                        warn!("Replication stream error: {e}");
+                        break;
+                    }
+                    None => {
+                        warn!("Replication stream ended unexpectedly");
+                        break;
+                    }
+                };
+
+                match decoder.decode(&wal_bytes) {
+                    Ok(events) => {
+                        if events.is_empty() {
+                            // Decoder accumulates data across calls;
+                            // only emits events on transaction commit
+                            continue;
+                        }
+
+                        let count = events.len() as u64;
+
+                        // Update health state
+                        {
+                            let mut health = sse.health_state().write().await;
+                            health.events_captured += count;
+                            if let Some(first) = events.first() {
+                                health.current_lsn = first.source.lsn.to_string();
+                            }
+                        }
+
+                        // Extract checkpoint metadata from the first event
+                        let checkpoint_lsn: Option<Lsn> = events.first()
+                            .and_then(|e| e.source.lsn.0.parse::<Lsn>().ok());
+                        let checkpoint_tx = events.first()
+                            .map(|e| e.source.tx_id.clone());
+                        let checkpoint_ts = events.first()
+                            .map(|e| e.source.ts_ms)
+                            .unwrap_or(0);
+
+                        // Forward decoded events to the SSE bridge task
+                        for event in events {
+                            let _ = change_tx.send(event);
+                        }
+
+                        // Persist offset checkpoint
+                        if let (Some(lsn), Some(tx_id)) = (checkpoint_lsn, checkpoint_tx) {
+                            let store = state.lock().await;
+                            if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false) {
+                                warn!("Failed to persist offset checkpoint: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("WAL decode error: {e}");
+                    }
+                }
             }
         }
     }
