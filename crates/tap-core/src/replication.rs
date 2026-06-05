@@ -320,7 +320,7 @@ async fn authenticate(
                 let client_nonce = generate_nonce();
                 let client_first_bare =
                     format!("n={},r={}", scram_client_first_bare(config), client_nonce);
-                let client_first = format!("n,,") + &client_first_bare;
+                let client_first = String::from("n,,") + &client_first_bare;
                 let client_first_bytes = client_first.as_bytes();
                 let client_first_len = client_first_bytes.len() as i32;
 
@@ -610,11 +610,9 @@ async fn reader_task(mut stream: MaybeTls, tx: mpsc::Sender<Result<Vec<u8>, TapE
 
                         // Yield the actual WAL data (after the 25-byte header)
                         let wal_data = payload[25..].to_vec();
-                        if !wal_data.is_empty() {
-                            if tx.send(Ok(wal_data)).await.is_err() {
-                                // Receiver dropped
-                                return;
-                            }
+                        if !wal_data.is_empty() && tx.send(Ok(wal_data)).await.is_err() {
+                            // Receiver dropped
+                            return;
                         }
                         // Even if empty, the stream is alive
                     }
