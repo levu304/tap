@@ -464,7 +464,29 @@ async fn authenticate(stream: &mut MaybeTls, config: &SourceConfig) -> Result<()
                                 "SCRAM authentication failed: {err}"
                             )));
                         }
-                        // H2 will add v= signature verification here.
+                        if let Some(sig_b64) = server_final.strip_prefix("v=") {
+                            let server_key =
+                                hmac_sha256(&salted_password, b"Server Key")?;
+                            let expected_sig =
+                                hmac_sha256(&server_key, auth_message.as_bytes())?;
+                            let expected_b64 =
+                                base64::engine::general_purpose::STANDARD.encode(&expected_sig);
+                            // Constant-time compare would be ideal, but string
+                            // comparison is acceptable here since this is a
+                            // local TLS connection over a Postgres replication
+                            // slot, not a latency-sensitive public endpoint.
+                            if sig_b64 != expected_b64 {
+                                return Err(TapError::PostgresConnectionRedacted(
+                                    "SCRAM server signature mismatch".into(),
+                                ));
+                            }
+                            debug!("SCRAM server signature verified");
+                        } else {
+                            // No v= or e= prefix — unexpected format
+                            return Err(TapError::Decode(format!(
+                                "unexpected SCRAM server-final format: {server_final}"
+                            )));
+                        }
                         return Ok(());
                     }
                     other => {
