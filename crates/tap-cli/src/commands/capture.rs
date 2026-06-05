@@ -356,8 +356,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                         let checkpoint_tx = events.first()
                             .map(|e| e.source.tx_id.clone());
                         let checkpoint_ts = events.first()
-                            .map(|e| e.source.ts_ms)
-                            .unwrap_or(0);
+                            .map_or(0, |e| e.source.ts_ms);
 
                         // Forward decoded events to the SSE bridge task
                         for event in events {
