@@ -316,7 +316,7 @@ pub async fn start(
     let lsn_str = start_lsn.to_string();
     let query = format!(
         "START_REPLICATION SLOT \"{slot_name}\" LOGICAL {lsn_str} \
-         (publication_names '{publication}')"
+         (proto_version '1', publication_names '{publication}')"
     );
     send_query(&mut stream, &query).await?;
 
