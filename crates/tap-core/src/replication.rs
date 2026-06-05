@@ -259,7 +259,37 @@ pub async fn start(
         }
 
         info!("wrapping connection with TLS");
-        let native_connector = native_tls::TlsConnector::builder().build().map_err(|e| {
+
+        // Build a connector that respects the configured SslMode.
+        //
+        // native_tls 0.2 defaults:
+        //   - danger_accept_invalid_certs:    false (verify certs)
+        //   - danger_accept_invalid_hostnames: false (verify hostname)
+        //   - disable_built_in_roots:          false (use system roots)
+        let mut tls_builder = native_tls::TlsConnector::builder();
+        match config.ssl_mode {
+            SslMode::Require => {
+                // Encrypt only — no certificate or hostname verification.
+                tls_builder.danger_accept_invalid_certs(true);
+                tls_builder.danger_accept_invalid_hostnames(true);
+            }
+            SslMode::VerifyCa => {
+                // Verify the certificate against system CAs but skip
+                // hostname check.
+                tls_builder.danger_accept_invalid_hostnames(true);
+                // danger_accept_invalid_certs remains false (verify).
+                // Built-in roots are used by default.
+            }
+            SslMode::VerifyFull => {
+                // Full verification — both cert and hostname.
+                // All defaults already do this.
+            }
+            SslMode::Disable => {
+                // Handled above — we never reach this branch.
+                unreachable!("SslMode::Disable handled before TLS builder");
+            }
+        }
+        let native_connector = tls_builder.build().map_err(|e| {
             TapError::PostgresConnectionRedacted(format!("failed to build TLS connector: {e}"))
         })?;
         let connector = tokio_native_tls::TlsConnector::from(native_connector);
