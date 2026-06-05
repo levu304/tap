@@ -1,0 +1,34 @@
+# Validate Action Pins
+#
+# Verifies that every `uses: <owner>/<repo>@<40hex>` directive in the
+# workflow files points to a valid commit SHA, not a fabricated SHA or an
+# annotated-tag SHA.
+#
+# This prevents the v0.1.0 failure mode where 4 of 8 action pins in
+# release.yml were unresolvable (2 fabricated, 2 annotated-tag SHAs).
+#
+# Runs on push/PR to main — cheap (<30 s), read-only API calls.
+
+name: Validate Action Pins
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate pinned action SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate action SHA pins
+        run: .github/scripts/validate-action-pins.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
