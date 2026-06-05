@@ -36,6 +36,13 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## CI Workflow
+
+**After any code change (clippy fix, refactor, etc.), run `cargo fmt --all` before committing.**
+Clippy can change expression structure which `cargo fmt` re-flows. The order must be:
+fix → `cargo fmt` → `cargo clippy --workspace -- --deny warnings`. Skipping the format
+step after a clippy fix guarantees a CI Format failure on the next push.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
