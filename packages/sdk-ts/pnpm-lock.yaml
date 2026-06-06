@@ -16,20 +16,20 @@ importers:
         version: 3.2.6
     optionalDependencies:
       tap-cdc-darwin-arm64:
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 0.1.3
+        version: 0.1.3
       tap-cdc-darwin-x64:
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 0.1.3
+        version: 0.1.3
       tap-cdc-linux-arm64-gnu:
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 0.1.3
+        version: 0.1.3
       tap-cdc-linux-x64-gnu:
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 0.1.3
+        version: 0.1.3
       tap-cdc-linux-x64-musl:
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 0.1.3
+        version: 0.1.3
 
 packages:
 
@@ -487,34 +487,34 @@ packages:
   strip-literal@3.1.0:
     resolution: {integrity: sha512-8r3mkIM/2+PpjHoOtiAW8Rg3jJLHaV7xPwG+YRGrv6FP0wwk/toTpATxWYOW0BKdWwl82VT2tFYi5DlROa0Mxg==}
 
-  tap-cdc-darwin-arm64@0.1.1:
-    resolution: {integrity: sha512-7+ATVC5vPF/9P4WW8LZBVK1gotDbXo/arz7WyoQH7PtxXkNgZBHermyn6tc19QNrYwyFFcYFR+4a6ALN4PY+qA==}
+  tap-cdc-darwin-arm64@0.1.3:
+    resolution: {integrity: sha512-8gxk5We/gBCj6yA8q1H+/gfvFLHxaS4OAufRXMJ4CwBEouhCscQ9Nz+5abWH9bo85ZpHdOwwOvYdwdbLCyjyzg==}
     engines: {node: '>= 18'}
     cpu: [arm64]
     os: [darwin]
 
-  tap-cdc-darwin-x64@0.1.1:
-    resolution: {integrity: sha512-TQVfUjISOnKErb2zRnYLLxtggMJ2SaMq3nM5wYQ9YvNo12pXlTAShgWtruw6GCrAvR75Noy4J1pQk1t7YatOHg==}
+  tap-cdc-darwin-x64@0.1.3:
+    resolution: {integrity: sha512-dnj0k+IUIPK2pG1DofTX/CGe+fXyZwRZwlzy5fZzgA2NMOnkXuge6oaS9MuqNCoa51DEcSKwKStxJT65jDtxuw==}
     engines: {node: '>= 18'}
     cpu: [x64]
     os: [darwin]
 
-  tap-cdc-linux-arm64-gnu@0.1.1:
-    resolution: {integrity: sha512-+/8bXiHHWszLclLGHlLE+anICGvhLvzM+VpOub4RjD4GAM/t4SmFQf8jXTfRtu0p9R7iWQ2+sfgBzTuG6bgFiA==}
+  tap-cdc-linux-arm64-gnu@0.1.3:
+    resolution: {integrity: sha512-Imrc5gnKEwEda7QeK26rmFjbBWqOOYLVa9vh//3giyUZjVR3irl2MQNLUSPxZelw8UOH7sMrbKsAxFqS6/q8WQ==}
     engines: {node: '>= 18'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  tap-cdc-linux-x64-gnu@0.1.1:
-    resolution: {integrity: sha512-SlGcqeWSkbhA09DqRgQdQqjGtT01mB8zNTjj2KmfgWZLsE4YznRo0Dew6EfwEJu2DAX3uhg3WPmswKIuzY+XwA==}
+  tap-cdc-linux-x64-gnu@0.1.3:
+    resolution: {integrity: sha512-6R2MqwPkKEkzIqDVoAMzOLIFq/s3QDNPmbrxmu1LQJ1vGx9oJFRPqqgxGmPV4IxatoCEOv79YiB5xeqD/wy1xw==}
     engines: {node: '>= 18'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  tap-cdc-linux-x64-musl@0.1.1:
-    resolution: {integrity: sha512-7fXzDrX5n+4ISWKlVFM3HP7PgOr5p6TL3bRxVX8TsFSNTde47HECaj+YwPsGM/mvcBPk3mgt2TY/JAc3wypEMQ==}
+  tap-cdc-linux-x64-musl@0.1.3:
+    resolution: {integrity: sha512-nKMpDZKuyPbJagjKq9UnqaEz51E9KiEhKDqdjXsFLQrvMuPehZTRgZ6bjhBxuKUb03X4xcsBgrOOKI/Y0Ja2fg==}
     engines: {node: '>= 18'}
     cpu: [x64]
     os: [linux]
@@ -963,19 +963,19 @@ snapshots:
     dependencies:
       js-tokens: 9.0.1
 
-  tap-cdc-darwin-arm64@0.1.1:
+  tap-cdc-darwin-arm64@0.1.3:
     optional: true
 
-  tap-cdc-darwin-x64@0.1.1:
+  tap-cdc-darwin-x64@0.1.3:
     optional: true
 
-  tap-cdc-linux-arm64-gnu@0.1.1:
+  tap-cdc-linux-arm64-gnu@0.1.3:
     optional: true
 
-  tap-cdc-linux-x64-gnu@0.1.1:
+  tap-cdc-linux-x64-gnu@0.1.3:
     optional: true
 
-  tap-cdc-linux-x64-musl@0.1.1:
+  tap-cdc-linux-x64-musl@0.1.3:
     optional: true
 
   tinybench@2.9.0: {}
