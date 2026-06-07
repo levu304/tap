@@ -19,4 +19,4 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-pyo3-build-config = "0.22"
+pyo3-build-config = "0.24"

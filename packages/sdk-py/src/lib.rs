@@ -15,6 +15,7 @@ struct TapCore {
 }
 
 #[pymethods]
+#[allow(unsafe_op_in_unsafe_fn, clippy::useless_conversion)]
 impl TapCore {
     #[new]
     fn new() -> Self {

@@ -59,7 +59,7 @@ napi = { version = "2", features = ["serde-json", "async", "tokio_rt"] }
 napi-derive = "2"
 
 # Python bindings
-pyo3 = "0.22"
+pyo3 = "0.24"
 
 # v0.2.0 new dependencies
 mysql_async = { version = "0.37", features = ["binlog"] }
