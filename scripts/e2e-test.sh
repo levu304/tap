@@ -162,7 +162,7 @@ echo "Config written to $TEMP_CONFIG"
 echo "=== Starting Tap capture ==="
 
 # Run capture in background, capture output
-cargo run -- capture --config "$TEMP_CONFIG" >"$TEMP_OUTPUT" 2>&1 &
+cargo run --bin tap-cli -- capture --config "$TEMP_CONFIG" >"$TEMP_OUTPUT" 2>&1 &
 CAPTURE_PID=$!
 
 echo "Capture PID: $CAPTURE_PID"
