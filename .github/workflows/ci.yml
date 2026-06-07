@@ -72,7 +72,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
-      - uses: arduino/setup-protoc@v3
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          fi
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace
         # Build with test profile so downstream test jobs reuse artifacts.
@@ -175,7 +181,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
-      - uses: arduino/setup-protoc@v3
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          fi
       - uses: Swatinem/rust-cache@v2
 
       - name: Run library tests
