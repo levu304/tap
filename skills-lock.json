@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "grpc-service-development": {
+      "source": "aj-geddes/useful-ai-prompts",
+      "sourceType": "github",
+      "skillPath": "skills/grpc-service-development/SKILL.md",
+      "computedHash": "ea2ee8acb7ede8ad05874feaab013c263dbf9b1d1e70c8b01c458e8cd730508c"
+    },
     "memory-safety-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",
