@@ -1,0 +1,24 @@
+# tap-proto moon task graph
+# https://moonrepo.dev/docs/config/project
+
+language: rust
+
+tasks:
+  build:
+    command: cargo build -p tap-proto
+    inputs:
+      - "src/**/*"
+      - "Cargo.toml"
+      - "proto/**/*"
+      - "build.rs"
+
+  test:
+    command: cargo test -p tap-proto
+    deps:
+      - build
+
+  lint:
+    command: cargo clippy -p tap-proto -- -D warnings
+
+  fmt:
+    command: cargo fmt -p tap-proto -- --check

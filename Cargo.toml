@@ -4,6 +4,9 @@ members = [
     "crates/tap-core",
     "crates/tap-cli",
     "packages/sdk-ts",
+    "crates/tap-proto",
+    "crates/tap-sidecar",
+    "packages/sdk-py",
 ]
 
 [workspace.package]
@@ -54,6 +57,18 @@ anyhow = "1"
 # napi-rs (Node.js bindings, used by packages/sdk-ts)
 napi = { version = "2", features = ["serde-json", "async", "tokio_rt"] }
 napi-derive = "2"
+
+# Python bindings
+pyo3 = "0.22"
+
+# v0.2.0 new dependencies
+mysql_async = { version = "0.37", features = ["binlog"] }
+wasmtime = "21"
+tokio-tungstenite = "0.23"
+tonic = "0.12"
+prost = "0.13"
+prometheus = "0.13"
+swc_core = { version = "0.99", features = ["ecmascript"] }
 
 [profile.release]
 lto = "fat"

@@ -284,3 +284,51 @@ jobs:
           TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
           PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
         run: ./scripts/e2e-test.sh
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: MySQL integration test (Phase 3)
+  # ---------------------------------------------------------------------------
+  integration-test-mysql:
+    name: MySQL Integration
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: MySQL integration test stub
+        run: echo "MySQL integration test — placeholder (Phase 3)"
+
+  # ---------------------------------------------------------------------------
+  # Stage 7b: Python SDK build
+  # ---------------------------------------------------------------------------
+  sdk-py-build:
+    name: SDK (Python)
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Python SDK
+        run: cargo build -p tap-sdk-py
+
+  # ---------------------------------------------------------------------------
+  # Stage 7c: Sidecar build
+  # ---------------------------------------------------------------------------
+  sidecar-build:
+    name: Sidecar Build
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build sidecar
+        run: cargo build -p tap-sidecar

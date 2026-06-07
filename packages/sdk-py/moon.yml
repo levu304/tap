@@ -1,0 +1,13 @@
+language: rust
+tasks:
+  build:
+    command: cargo build -p tap-sdk-py
+    inputs:
+      - "src/**/*"
+      - "Cargo.toml"
+    deps:
+      - tap-core:build
+  lint:
+    command: cargo clippy -p tap-sdk-py -- -D warnings
+  fmt:
+    command: cargo fmt -p tap-sdk-py -- --check

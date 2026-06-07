@@ -1,0 +1,18 @@
+[package]
+name = "tap-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tap CDC protobuf types — gRPC service definitions for polyglot clients"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"
