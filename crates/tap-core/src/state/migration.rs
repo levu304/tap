@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_migration_empty_db_returns_version_0() {
-        let mut conn = memory_conn();
+        let conn = memory_conn();
         assert_eq!(current_version(&conn).unwrap(), 0);
     }
 
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_current_version_0_no_table() {
-        let mut conn = memory_conn();
+        let conn = memory_conn();
         // Without schema_version table, current_version returns 0
         assert_eq!(current_version(&conn).unwrap(), 0);
     }
