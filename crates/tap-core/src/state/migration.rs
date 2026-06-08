@@ -2,7 +2,8 @@
 //!
 //! Tracks the current schema version in the `schema_version` table and
 //! applies forward-only SQL migrations sequentially.  The initial migration
-//! (version 1) creates all six tables used by [`StateStore`](super::store::StateStore).
+//! (version 1) creates all six tables used by [`StateStore`](super::store::StateStore),
+//! and version 2 renames columns/table names and adds the `snapshot_chunks` table.
 
 use rusqlite::Connection;
 use tracing::info;
@@ -10,7 +11,7 @@ use tracing::info;
 use crate::error::TapError;
 
 /// The latest schema version understood by this build.
-const LATEST_VERSION: i64 = 1;
+const LATEST_VERSION: i64 = 2;
 
 /// Run all pending forward-only migrations on the given connection.
 ///
@@ -74,6 +75,9 @@ fn apply_migration(conn: &Connection, version: i64) -> Result<(), TapError> {
     match version {
         1 => {
             conn.execute_batch(MIGRATION_V1)?;
+        }
+        2 => {
+            conn.execute_batch(MIGRATION_V2)?;
         }
         _ => {
             return Err(TapError::StateCorruption(format!(
@@ -144,6 +148,34 @@ CREATE TABLE IF NOT EXISTS instance_info (
 );
 "#;
 
+/// Version 2: v0.1.0 → v0.2.0 schema migration.
+///
+/// Changes:
+/// - Rename `offsets.committed_lsn` → `offsets.position`
+/// - Add `offsets.adapter` column (default `'pgoutput'`)
+/// - Rename `skipped_lsns` → `skipped_positions`; rename `lsn` → `position`
+/// - Create `snapshot_chunks` table for large-table chunking support
+const MIGRATION_V2: &str = r#"
+ALTER TABLE offsets RENAME COLUMN committed_lsn TO position;
+ALTER TABLE offsets ADD COLUMN adapter TEXT NOT NULL DEFAULT 'pgoutput';
+ALTER TABLE skipped_lsns RENAME TO skipped_positions;
+ALTER TABLE skipped_positions RENAME COLUMN lsn TO position;
+CREATE TABLE IF NOT EXISTS snapshot_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_start TEXT,
+    chunk_end TEXT,
+    rows_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    UNIQUE(snapshot_id, table_name, chunk_index)
+);
+"#;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -174,12 +206,14 @@ mod tests {
     #[test]
     fn test_migration_v1_creates_tables() {
         let conn = memory_conn();
-        migrate(&conn).expect("migrate to v1");
+        // Apply only v1 migration (not the full chain to v2)
+        apply_migration(&conn, 1).expect("apply v1");
+        set_version(&conn, 1).expect("set version");
 
         // Check version
         assert_eq!(current_version(&conn).unwrap(), 1);
 
-        // Verify all 6 tables exist
+        // Verify all 6 v1 tables exist
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
@@ -208,7 +242,7 @@ mod tests {
         migrate(&conn).expect("first migration");
         migrate(&conn).expect("second migration (idempotent)");
 
-        assert_eq!(current_version(&conn).unwrap(), 1);
+        assert_eq!(current_version(&conn).unwrap(), 2);
     }
 
     #[test]
@@ -216,7 +250,7 @@ mod tests {
         let conn = memory_conn();
         migrate(&conn).expect("migrate");
 
-        // Verify offsets columns exist
+        // Verify offsets columns exist (v2 schema: position instead of committed_lsn)
         let cols: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('offsets') ORDER BY cid")
             .unwrap()
@@ -225,7 +259,8 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
 
-        assert!(cols.contains(&"committed_lsn".into()));
+        assert!(cols.contains(&"position".into()), "missing position column");
+        assert!(cols.contains(&"adapter".into()), "missing adapter column");
         assert!(cols.contains(&"tx_id".into()));
         assert!(cols.contains(&"ts_ms".into()));
         assert!(cols.contains(&"sequence".into()));
@@ -237,5 +272,80 @@ mod tests {
         let conn = memory_conn();
         // Without schema_version table, current_version returns 0
         assert_eq!(current_version(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_migration_v2_applies_on_top_of_v1() {
+        let conn = memory_conn();
+
+        // 1. Apply only v1 migration (not the full chain to v2)
+        apply_migration(&conn, 1).expect("apply v1");
+        set_version(&conn, 1).expect("set version");
+        assert_eq!(current_version(&conn).unwrap(), 1);
+
+        // 2. Insert a row into offsets using v1 schema
+        conn.execute(
+            "INSERT INTO offsets (committed_lsn, tx_id, ts_ms, sequence, is_final)
+             VALUES ('0/DEADBEEF', 'tx_v1', 1000, 1, 1)",
+            [],
+        )
+        .expect("insert v1 offset");
+
+        // 3. Run migration to v2 (migrate sees version=1, applies v2)
+        migrate(&conn).expect("migrate to v2");
+        assert_eq!(current_version(&conn).unwrap(), 2);
+
+        // 5. Verify position column exists and carries the old committed_lsn value
+        let position: String = conn
+            .query_row(
+                "SELECT position FROM offsets WHERE sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read position");
+        assert_eq!(
+            position, "0/DEADBEEF",
+            "position should carry old committed_lsn value"
+        );
+
+        // 6. Verify adapter column exists with default
+        let adapter: String = conn
+            .query_row(
+                "SELECT adapter FROM offsets WHERE sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read adapter");
+        assert_eq!(adapter, "pgoutput", "adapter should have default value");
+
+        // 7. Verify skipped_positions table exists
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skipped_positions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check table");
+        assert_eq!(table_count, 1, "skipped_positions table should exist");
+
+        // 8. Verify snapshot_chunks table exists
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshot_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check table");
+        assert_eq!(chunk_count, 1, "snapshot_chunks table should exist");
+
+        // 9. Verify old skipped_lsns table is gone
+        let old_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skipped_lsns'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check table");
+        assert_eq!(old_table_count, 0, "skipped_lsns table should be gone");
     }
 }

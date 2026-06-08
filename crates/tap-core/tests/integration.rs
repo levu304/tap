@@ -724,7 +724,7 @@ async fn test_state_store_offset_persistence() {
         // Write a checkpoint (simulating a streamed transaction)
         let lsn: Lsn = "0/16B37428".parse().expect("valid LSN");
         store
-            .write_offset(&lsn, "12345", 1717000000000, false)
+            .write_offset(&lsn, "12345", 1717000000000, false, "pgoutput")
             .expect("write offset");
 
         // Read it back
@@ -732,13 +732,13 @@ async fn test_state_store_offset_persistence() {
             .read_last_offset()
             .expect("read offset")
             .expect("offset should exist");
-        assert_eq!(offset.committed_lsn, "0/16B37428");
+        assert_eq!(offset.position, "0/16B37428");
         assert!(!offset.is_final, "non-final offset");
 
         // Write a final (flush) checkpoint
         let lsn2: Lsn = "0/16B37429".parse().expect("valid LSN");
         store
-            .write_offset(&lsn2, "12346", 1717000001000, true)
+            .write_offset(&lsn2, "12346", 1717000001000, true, "pgoutput")
             .expect("write final offset");
 
         // Read back — should prefer the final offset
@@ -746,7 +746,7 @@ async fn test_state_store_offset_persistence() {
             .read_last_offset()
             .expect("read offset")
             .expect("offset should exist");
-        assert_eq!(final_offset.committed_lsn, "0/16B37429");
+        assert_eq!(final_offset.position, "0/16B37429");
         assert!(final_offset.is_final, "should be final offset");
     }
 
@@ -758,7 +758,7 @@ async fn test_state_store_offset_persistence() {
             .expect("read offset")
             .expect("offset should persist across restarts");
         assert_eq!(
-            offset.committed_lsn, "0/16B37429",
+            offset.position, "0/16B37429",
             "persisted LSN should survive restart"
         );
         assert!(offset.is_final, "persisted offset should be final");
