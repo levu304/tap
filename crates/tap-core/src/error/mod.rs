@@ -62,6 +62,19 @@ pub enum TapError {
     #[error("Data decode error: {0}")]
     Decode(String),
 
+    /// Error from the MySQL wire protocol or binlog connection.
+    ///
+    /// The inner error may include the connection string in its `Display`
+    /// output on some variants.  Use
+    /// [`TapError::MySqlConnectionRedacted`] at connect sites where
+    /// the connection string may contain secrets.
+    #[error("MySQL connection error: {0}")]
+    MySqlConnection(String),
+
+    /// MySQL connection error with credentials redacted from the message.
+    #[error("MySQL connection error: {0}")]
+    MySqlConnectionRedacted(String),
+
     /// Standard I/O error (file reads, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

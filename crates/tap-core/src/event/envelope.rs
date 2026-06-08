@@ -194,7 +194,7 @@ impl FromStr for Operation {
 }
 
 /// Custom serde helpers — serialise `Operation` as single-character codes.
-mod operation_code {
+pub mod operation_code {
     use super::Operation;
     use serde::de::{self, Deserializer};
     use serde::ser::Serializer;

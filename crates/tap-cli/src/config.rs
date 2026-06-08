@@ -41,6 +41,7 @@ pub fn config_from_init_args(args: &InitArgs) -> TapConfig {
             plugin: args.plugin.clone(),
             ssl_mode: SslMode::Disable,
         },
+        mysql_source: None,
         sink: SinkConfig::default(),
         capture: CaptureConfig::default(),
         snapshot: SnapshotConfig::default(),
