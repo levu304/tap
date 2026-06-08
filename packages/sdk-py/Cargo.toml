@@ -11,12 +11,7 @@ name = "tap_cdc"
 crate-type = ["cdylib"]
 
 [dependencies]
-tap-core = { path = "../../crates/tap-core" }
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
 
 [build-dependencies]
 pyo3-build-config = "0.24"

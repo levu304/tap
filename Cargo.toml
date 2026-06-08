@@ -44,11 +44,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP / SSE server
 axum = "0.8"
 http = "1"
+tower-http = { version = "0.6", features = ["validate-request"] }
 
 # Error handling
 thiserror = "2"
@@ -62,13 +63,8 @@ napi-derive = "2"
 pyo3 = "0.24"
 
 # v0.2.0 new dependencies
-mysql_async = { version = "0.37", features = ["binlog"] }
-wasmtime = "21"
-tokio-tungstenite = "0.23"
 tonic = "0.12"
 prost = "0.13"
-prometheus = "0.13"
-swc_core = { version = "0.99", features = ["ecmascript"] }
 
 [profile.release]
 lto = "fat"

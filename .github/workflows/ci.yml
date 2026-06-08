@@ -349,5 +349,5 @@ jobs:
         with:
           toolchain: "1.85.0"
       - uses: Swatinem/rust-cache@v2
-      - name: Build sidecar
-        run: cargo build -p tap-sidecar
+      - name: Build and test sidecar
+        run: cargo test -p tap-sidecar

@@ -7,18 +7,19 @@ authors.workspace = true
 license.workspace = true
 description = "Tap CDC WebSocket sidecar — bridges Postgres WAL to streaming clients"
 
+[dev-dependencies]
+tower = "0.5"
+
 [dependencies]
-tap-core = { path = "../tap-core" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-thiserror.workspace = true
 anyhow.workspace = true
 axum = { workspace = true, features = ["ws"] }
 http.workspace = true
 futures.workspace = true
 tokio-stream = "0.1"
-tokio-tungstenite = "0.23"
+tower-http.workspace = true

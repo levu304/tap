@@ -12,6 +12,7 @@ use axum::{
 use clap::Parser;
 use serde::Serialize;
 use tokio::sync::Mutex;
+use tower_http::validate_request::ValidateRequestHeaderLayer;
 use tracing::info;
 
 mod sse;
@@ -21,19 +22,22 @@ mod ws;
 #[derive(Parser, Debug)]
 #[command(
     name = "tap-sidecar",
-    version = "0.2.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Tap CDC sidecar server"
 )]
 struct Args {
     /// Listen address
     #[arg(long, default_value = "127.0.0.1:9911")]
     bind: String,
+
+    /// API key for capture control endpoints (default: TAP_SIDECAR_API_KEY env or "dev-key")
+    #[arg(long, env = "TAP_SIDECAR_API_KEY", default_value = "dev-key")]
+    api_key: String,
 }
 
 #[derive(Clone, Serialize)]
 struct HealthResponse {
     status: String,
-    version: String,
     uptime_seconds: u64,
 }
 
@@ -41,6 +45,7 @@ struct AppState {
     started_at: tokio::time::Instant,
 }
 
+#[allow(clippy::result_large_err)]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -56,6 +61,31 @@ async fn main() -> Result<()> {
         started_at: tokio::time::Instant::now(),
     }));
 
+    // Capture control endpoints — protected by bearer auth
+    let capture_routes = Router::new()
+        .route("/capture/start", post(capture_start_handler))
+        .route("/capture/stop", post(capture_stop_handler))
+        .route("/capture/pause", post(capture_pause_handler))
+        .route("/capture/resume", post(capture_resume_handler))
+        .layer(ValidateRequestHeaderLayer::custom({
+            let expected = format!("Bearer {}", args.api_key);
+            move |req: &mut http::Request<axum::body::Body>| {
+                if req
+                    .headers()
+                    .get("Authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v == expected)
+                {
+                    Ok(())
+                } else {
+                    Err(http::Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(axum::body::Body::empty())
+                        .unwrap())
+                }
+            }
+        }));
+
     let app = Router::new()
         // Observability
         .route("/health", get(health_handler))
@@ -64,11 +94,8 @@ async fn main() -> Result<()> {
         .route("/events", get(sse::events_handler))
         // WebSocket event stream
         .route("/ws/events", any(ws::ws_handler))
-        // Capture control (stubs for now)
-        .route("/capture/start", post(capture_start_handler))
-        .route("/capture/stop", post(capture_stop_handler))
-        .route("/capture/pause", post(capture_pause_handler))
-        .route("/capture/resume", post(capture_resume_handler))
+        // Capture control (protected by bearer auth)
+        .merge(capture_routes)
         .with_state(state);
 
     let addr: SocketAddr = args.bind.parse()?;
@@ -82,7 +109,6 @@ async fn health_handler(State(state): State<Arc<Mutex<AppState>>>) -> impl IntoR
     let state = state.lock().await;
     Json(HealthResponse {
         status: "ok".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
         uptime_seconds: state.started_at.elapsed().as_secs(),
     })
 }
@@ -101,9 +127,75 @@ async fn capture_stop_handler() -> impl IntoResponse {
 }
 
 async fn capture_pause_handler() -> impl IntoResponse {
-    StatusCode::OK
+    StatusCode::ACCEPTED
 }
 
 async fn capture_resume_handler() -> impl IntoResponse {
-    StatusCode::OK
+    StatusCode::ACCEPTED
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn test_health_returns_ok() {
+        let state = Arc::new(Mutex::new(AppState {
+            started_at: tokio::time::Instant::now(),
+        }));
+
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_body_fields() {
+        let state = Arc::new(Mutex::new(AppState {
+            started_at: tokio::time::Instant::now(),
+        }));
+
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["status"], "ok");
+        assert!(
+            body.get("version").is_none(),
+            "version must not leak on unauthenticated endpoint"
+        );
+        assert!(body["uptime_seconds"].as_u64().is_some());
+    }
 }
