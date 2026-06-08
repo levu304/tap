@@ -364,14 +364,17 @@ impl fmt::Display for MySqlSourceConfig {
 }
 
 impl MySqlSourceConfig {
-    /// Build a MySQL connection URL suitable for `mysql_async::Pool`.
+    /// Build an `OptsBuilder` for `mysql_async::Pool`.
     ///
-    /// The password is not redacted — use [`Self::redacted_url`] for logging.
-    pub fn connection_url(&self) -> String {
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.dbname,
-        )
+    /// Each field is set separately, avoiding URL encoding issues with credentials
+    /// that contain metacharacters (`@`, `:`, `/`).
+    pub fn opts(&self) -> mysql_async::OptsBuilder {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(self.host.clone())
+            .tcp_port(self.port)
+            .user(Some(self.user.clone()))
+            .pass(Some(self.password.clone()))
+            .db_name(Some(self.dbname.clone()))
     }
 
     /// Build a connection URL with the password redacted for logging.

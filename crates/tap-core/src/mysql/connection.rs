@@ -22,7 +22,7 @@
 //!    table-level `SELECT` privileges on the target database.
 
 use mysql_async::prelude::*;
-use mysql_async::{Conn, Opts, Pool};
+use mysql_async::{Conn, Pool};
 use tracing::info;
 
 use crate::config::MySqlSourceConfig;
@@ -51,11 +51,8 @@ impl MySqlConnection {
     /// leaked in logs or error messages).
     pub async fn connect(config: MySqlSourceConfig) -> Result<Self, TapError> {
         let redacted = config.redacted_url();
-        let opts = Opts::from_url(&config.connection_url()).map_err(|e| {
-            TapError::MySqlConnectionRedacted(format!("invalid MySQL options from {redacted}: {e}"))
-        })?;
 
-        let pool = Pool::new(opts);
+        let pool = Pool::new(config.opts());
 
         // Verify connectivity with a simple ping.
         let mut conn = pool.get_conn().await.map_err(|e| {
@@ -265,12 +262,20 @@ impl MySqlConnection {
         })?;
 
         let grants_concat = grants.join(" ");
-        let has_replication_slave = grants_concat.to_uppercase().contains("REPLICATION SLAVE");
-        let has_replication_client = grants_concat.to_uppercase().contains("REPLICATION CLIENT");
-        let has_select_on_target = grants_concat
-            .to_uppercase()
-            .contains(&format!("SELECT ON `{}`", self.config.dbname))
-            || grants_concat.to_uppercase().contains("SELECT ON *.*");
+        let grants_upper = grants_concat.to_uppercase();
+
+        // ALL PRIVILEGES ON *.* covers every individual privilege check below.
+        if grants_upper.contains("ALL PRIVILEGES ON *.*") {
+            info!(%user, "MySQL privileges OK (all privileges)");
+            return Ok(());
+        }
+
+        let has_replication_slave = grants_upper.contains("REPLICATION SLAVE");
+        let has_replication_client = grants_upper.contains("REPLICATION CLIENT");
+        let has_select_on_target = grants_upper.contains(&format!(
+            "SELECT ON `{}`",
+            self.config.dbname.to_uppercase()
+        )) || grants_upper.contains("SELECT ON *.*");
 
         let mut missing: Vec<String> = Vec::new();
         if !has_replication_slave {
@@ -297,12 +302,17 @@ impl MySqlConnection {
 
 impl Drop for MySqlConnection {
     fn drop(&mut self) {
-        // Disconnect the pool.  This is best-effort — errors are swallowed
-        // because we are dropping.
-        let pool = self.pool.clone();
-        tokio::task::spawn(async move {
-            pool.disconnect().await.ok();
-        });
+        // Best-effort disconnect: spawn only if a Tokio runtime is active.
+        // Without this guard, tokio::task::spawn panics when dropped from a
+        // sync context (e.g. unit tests, shutdown after runtime teardown).
+        // When no runtime is available, mysql_async::Pool's own Drop handles
+        // cleanup.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool = self.pool.clone();
+            handle.spawn(async move {
+                pool.disconnect().await.ok();
+            });
+        }
     }
 }
 
@@ -345,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_url_redacted() {
+    fn test_redacted_url_hides_password() {
         let config = MySqlSourceConfig {
             dbname: "testdb".into(),
             user: "replicator".into(),
@@ -359,14 +369,18 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_url_full() {
+    fn test_opts_builder_accepts_special_chars() {
+        // Credentials with URL metacharacters must not cause encoding errors.
         let config = MySqlSourceConfig {
-            dbname: "testdb".into(),
-            user: "replicator".into(),
-            password: "hunter2".into(),
+            host: "127.0.0.1".into(),
+            port: 3306,
+            dbname: "test_db".into(),
+            user: "test_user".into(),
+            password: "p@ss:w0rd/foo".into(),
             ..Default::default()
         };
-        let url = config.connection_url();
-        assert!(url.contains("hunter2"));
+        // OptsBuilder should construct without errors regardless of
+        // credential content — it sets each field separately.
+        let _opts = config.opts();
     }
 }
