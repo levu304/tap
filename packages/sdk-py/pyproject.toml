@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tap-cdc"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.0,<3.0"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "tap_cdc._core"
+python-source = "python"

@@ -52,6 +52,7 @@ jobs:
         with:
           toolchain: "1.85.0"
           components: clippy
+      - uses: arduino/setup-protoc@v3
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
 
@@ -71,6 +72,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          fi
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace
         # Build with test profile so downstream test jobs reuse artifacts.
@@ -111,6 +119,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - uses: arduino/setup-protoc@v3
       - uses: Swatinem/rust-cache@v2
 
       - name: Configure Postgres for logical replication
@@ -172,6 +181,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.85.0"
+      - name: Install protoc
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install protobuf
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          fi
       - uses: Swatinem/rust-cache@v2
 
       - name: Run library tests
@@ -258,6 +274,9 @@ jobs:
           toolchain: "1.85.0"
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Configure Postgres for logical replication
         run: |
           docker exec ${{ job.services.postgres.id }} \
@@ -284,3 +303,51 @@ jobs:
           TAP_TEST_DB: ${{ secrets.TAP_TEST_DB || 'postgres://postgres:tap_test@localhost:5432/tap_test' }}
           PGPASSWORD: ${{ secrets.TAP_TEST_PG_PASSWORD || 'tap_test' }}
         run: ./scripts/e2e-test.sh
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: MySQL integration test (Phase 3)
+  # ---------------------------------------------------------------------------
+  integration-test-mysql:
+    name: MySQL Integration
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: MySQL integration test stub
+        run: echo "MySQL integration test — placeholder (Phase 3)"
+
+  # ---------------------------------------------------------------------------
+  # Stage 7b: Python SDK build
+  # ---------------------------------------------------------------------------
+  sdk-py-build:
+    name: SDK (Python)
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Python SDK
+        run: cargo build -p tap-sdk-py
+
+  # ---------------------------------------------------------------------------
+  # Stage 7c: Sidecar build
+  # ---------------------------------------------------------------------------
+  sidecar-build:
+    name: Sidecar Build
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and test sidecar
+        run: cargo test -p tap-sidecar

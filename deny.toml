@@ -12,6 +12,9 @@ feature-depth = 1
 ignore = [
     # RUSTSEC-2023-0071: memoffset is unmaintained, transitive via napi-rs on x86
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0020: PyString::from_object buffer overflow in pyo3.
+    # Scaffold stubs don't call this API. Upgrade when v0.24+ is available.
+    "RUSTSEC-2025-0020",
 ]
 # The lint level for crates with unmaintained advisory status
 # Accepted values: "all", "workspace", "transitive", "none"
@@ -20,6 +23,7 @@ ignore = [
 [licenses]
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",

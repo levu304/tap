@@ -4,6 +4,9 @@ members = [
     "crates/tap-core",
     "crates/tap-cli",
     "packages/sdk-ts",
+    "crates/tap-proto",
+    "crates/tap-sidecar",
+    "packages/sdk-py",
 ]
 
 [workspace.package]
@@ -41,11 +44,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP / SSE server
 axum = "0.8"
 http = "1"
+tower-http = { version = "0.6", features = ["validate-request"] }
 
 # Error handling
 thiserror = "2"
@@ -54,6 +58,13 @@ anyhow = "1"
 # napi-rs (Node.js bindings, used by packages/sdk-ts)
 napi = { version = "2", features = ["serde-json", "async", "tokio_rt"] }
 napi-derive = "2"
+
+# Python bindings
+pyo3 = "0.24"
+
+# v0.2.0 new dependencies
+tonic = "0.12"
+prost = "0.13"
 
 [profile.release]
 lto = "fat"

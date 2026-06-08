@@ -1,0 +1,17 @@
+[package]
+name = "tap-sdk-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for the Tap CDC engine"
+
+[lib]
+name = "tap_cdc"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }
+
+[build-dependencies]
+pyo3-build-config = "0.24"

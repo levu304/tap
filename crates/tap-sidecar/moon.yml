@@ -1,0 +1,24 @@
+# tap-sidecar moon task graph
+# https://moonrepo.dev/docs/config/project
+
+language: rust
+
+tasks:
+  build:
+    command: cargo build -p tap-sidecar
+    inputs:
+      - "src/**/*"
+      - "Cargo.toml"
+    deps:
+      - tap-core:build
+
+  test:
+    command: cargo test -p tap-sidecar
+    deps:
+      - build
+
+  lint:
+    command: cargo clippy -p tap-sidecar -- -D warnings
+
+  fmt:
+    command: cargo fmt -p tap-sidecar -- --check
