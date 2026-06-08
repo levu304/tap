@@ -22,7 +22,7 @@ const LATEST_VERSION: i64 = 2;
 /// # Errors
 ///
 /// Returns [`TapError::Sqlite`] on any database error during migration.
-pub fn migrate(conn: &Connection) -> Result<(), TapError> {
+pub fn migrate(conn: &mut Connection) -> Result<(), TapError> {
     let current = current_version(conn)?;
 
     if current >= LATEST_VERSION {
@@ -31,8 +31,9 @@ pub fn migrate(conn: &Connection) -> Result<(), TapError> {
 
     for version in (current + 1)..=LATEST_VERSION {
         info!(version, "applying schema migration");
+        // apply_migration wraps DDL + version bump in a single transaction,
+        // so no separate set_version call is needed here.
         apply_migration(conn, version)?;
-        set_version(conn, version)?;
     }
 
     Ok(())
@@ -61,23 +62,17 @@ fn current_version(conn: &Connection) -> Result<i64, TapError> {
     Ok(version)
 }
 
-/// Record the schema version after a successful migration.
-fn set_version(conn: &Connection, version: i64) -> Result<(), TapError> {
-    conn.execute(
-        "INSERT INTO schema_version (version) VALUES (?1)",
-        rusqlite::params![version],
-    )?;
-    Ok(())
-}
-
-/// Apply the SQL migration for `version`.
-fn apply_migration(conn: &Connection, version: i64) -> Result<(), TapError> {
+/// Apply the SQL migration for `version` atomically (DDL + version bump
+/// in a single transaction).  If the process dies mid-migration the entire
+/// batch is rolled back, preventing a crash-loop on restart.
+fn apply_migration(conn: &mut Connection, version: i64) -> Result<(), TapError> {
+    let tx = conn.transaction()?;
     match version {
         1 => {
-            conn.execute_batch(MIGRATION_V1)?;
+            tx.execute_batch(MIGRATION_V1)?;
         }
         2 => {
-            conn.execute_batch(MIGRATION_V2)?;
+            tx.execute_batch(MIGRATION_V2)?;
         }
         _ => {
             return Err(TapError::StateCorruption(format!(
@@ -85,6 +80,13 @@ fn apply_migration(conn: &Connection, version: i64) -> Result<(), TapError> {
             )));
         }
     }
+    // Write version inside the same transaction so the schema version
+    // always stays in sync with the applied DDL.
+    tx.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
+        rusqlite::params![version],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -156,8 +158,26 @@ CREATE TABLE IF NOT EXISTS instance_info (
 /// - Rename `skipped_lsns` → `skipped_positions`; rename `lsn` → `position`
 /// - Create `snapshot_chunks` table for large-table chunking support
 const MIGRATION_V2: &str = r#"
-ALTER TABLE offsets RENAME COLUMN committed_lsn TO position;
-ALTER TABLE offsets ADD COLUMN adapter TEXT NOT NULL DEFAULT 'pgoutput';
+-- Rebuild offsets table WITHOUT the UNIQUE constraint on position.
+-- The v1 DDL had `committed_lsn TEXT NOT NULL UNIQUE`, and ALTER TABLE
+-- RENAME COLUMN preserves the index.  Without this rebuild we cannot
+-- write the same LSN twice (e.g. is_final=0 during streaming and
+-- is_final=1 during shutdown).
+CREATE TABLE IF NOT EXISTS offsets_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position TEXT NOT NULL,
+    tx_id TEXT NOT NULL,
+    ts_ms INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    is_final INTEGER NOT NULL DEFAULT 0,
+    adapter TEXT NOT NULL DEFAULT 'pgoutput',
+    instance_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO offsets_new (id, position, tx_id, ts_ms, sequence, is_final, adapter, instance_id, created_at)
+SELECT id, committed_lsn, tx_id, ts_ms, sequence, is_final, 'pgoutput', instance_id, created_at FROM offsets;
+DROP TABLE offsets;
+ALTER TABLE offsets_new RENAME TO offsets;
 ALTER TABLE skipped_lsns RENAME TO skipped_positions;
 ALTER TABLE skipped_positions RENAME COLUMN lsn TO position;
 CREATE TABLE IF NOT EXISTS snapshot_chunks (
@@ -199,16 +219,16 @@ mod tests {
 
     #[test]
     fn test_migration_empty_db_returns_version_0() {
-        let conn = memory_conn();
+        let mut conn = memory_conn();
         assert_eq!(current_version(&conn).unwrap(), 0);
     }
 
     #[test]
     fn test_migration_v1_creates_tables() {
-        let conn = memory_conn();
-        // Apply only v1 migration (not the full chain to v2)
-        apply_migration(&conn, 1).expect("apply v1");
-        set_version(&conn, 1).expect("set version");
+        let mut conn = memory_conn();
+        // Apply only v1 migration (not the full chain to v2).
+        // apply_migration now writes the version inside the same transaction.
+        apply_migration(&mut conn, 1).expect("apply v1");
 
         // Check version
         assert_eq!(current_version(&conn).unwrap(), 1);
@@ -238,17 +258,17 @@ mod tests {
 
     #[test]
     fn test_migration_idempotent() {
-        let conn = memory_conn();
-        migrate(&conn).expect("first migration");
-        migrate(&conn).expect("second migration (idempotent)");
+        let mut conn = memory_conn();
+        migrate(&mut conn).expect("first migration");
+        migrate(&mut conn).expect("second migration (idempotent)");
 
         assert_eq!(current_version(&conn).unwrap(), 2);
     }
 
     #[test]
     fn test_migration_offsets_table_structure() {
-        let conn = memory_conn();
-        migrate(&conn).expect("migrate");
+        let mut conn = memory_conn();
+        migrate(&mut conn).expect("migrate");
 
         // Verify offsets columns exist (v2 schema: position instead of committed_lsn)
         let cols: Vec<String> = conn
@@ -265,22 +285,66 @@ mod tests {
         assert!(cols.contains(&"ts_ms".into()));
         assert!(cols.contains(&"sequence".into()));
         assert!(cols.contains(&"is_final".into()));
+
+        // Verify UNIQUE constraint on position has been removed.
+        let uniques: Vec<String> = conn
+            .prepare("SELECT il.name FROM pragma_index_list('offsets') il WHERE il.origin = 'u'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            !uniques.contains(&"sqlite_autoindex_offsets_1".into()),
+            "UNIQUE on position should be removed"
+        );
+    }
+
+    #[test]
+    fn test_write_same_lsn_twice() {
+        let mut conn = memory_conn();
+        migrate(&mut conn).expect("migrate");
+
+        // Write the same LSN as non-final then final — must not error.
+        conn.execute(
+            "INSERT INTO offsets (position, tx_id, ts_ms, sequence, is_final, adapter)
+             VALUES (?1, 'tx1', 1000, 1, 0, 'pgoutput')",
+            rusqlite::params!["0/DEADBEEF"],
+        )
+        .expect("first insert (non-final)");
+
+        conn.execute(
+            "INSERT INTO offsets (position, tx_id, ts_ms, sequence, is_final, adapter)
+             VALUES (?1, '0', 0, 2, 1, 'pgoutput')",
+            rusqlite::params!["0/DEADBEEF"],
+        )
+        .expect("second insert (final, same LSN)");
+
+        // Both rows should exist.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM offsets WHERE position = '0/DEADBEEF'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rows");
+        assert_eq!(count, 2, "should have two rows with same position");
     }
 
     #[test]
     fn test_current_version_0_no_table() {
-        let conn = memory_conn();
+        let mut conn = memory_conn();
         // Without schema_version table, current_version returns 0
         assert_eq!(current_version(&conn).unwrap(), 0);
     }
 
     #[test]
     fn test_migration_v2_applies_on_top_of_v1() {
-        let conn = memory_conn();
+        let mut conn = memory_conn();
 
-        // 1. Apply only v1 migration (not the full chain to v2)
-        apply_migration(&conn, 1).expect("apply v1");
-        set_version(&conn, 1).expect("set version");
+        // 1. Apply only v1 migration (not the full chain to v2).
+        //    apply_migration now writes the version inside the same transaction.
+        apply_migration(&mut conn, 1).expect("apply v1");
         assert_eq!(current_version(&conn).unwrap(), 1);
 
         // 2. Insert a row into offsets using v1 schema
@@ -292,7 +356,7 @@ mod tests {
         .expect("insert v1 offset");
 
         // 3. Run migration to v2 (migrate sees version=1, applies v2)
-        migrate(&conn).expect("migrate to v2");
+        migrate(&mut conn).expect("migrate to v2");
         assert_eq!(current_version(&conn).unwrap(), 2);
 
         // 5. Verify position column exists and carries the old committed_lsn value

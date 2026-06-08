@@ -118,7 +118,7 @@ impl StateStore {
         // pre-existing databases, not freshly created ones.
         let db_existed = path.exists();
 
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
 
         // ---- Pragma setup ----
         conn.execute_batch(
@@ -148,7 +148,7 @@ impl StateStore {
         }
 
         // ---- Run migrations ----
-        migrate(&conn)?;
+        migrate(&mut conn)?;
 
         // ---- Exclusive lock to detect duplicate instances ----
         // Acquire an exclusive transaction briefly.  If another instance
