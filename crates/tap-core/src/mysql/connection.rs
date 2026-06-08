@@ -308,7 +308,6 @@ impl Drop for MySqlConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::MySqlSourceConfig;
 
     /// Verify that the connection module compiles and that the config
