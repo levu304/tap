@@ -13,14 +13,15 @@
 //!
 //! # Tables
 //!
-//! | Table            | Purpose                              |
-//! |------------------|--------------------------------------|
-//! | `schema_version` | Migration version tracking           |
-//! | `offsets`        | Committed LSN checkpoints            |
-//! | `snapshots`      | Table snapshot progress              |
-//! | `schema_cache`   | Cached table schemas                 |
-//! | `skipped_lsns`   | LSNs that failed to process          |
-//! | `instance_info`  | Key–value instance metadata          |
+//! | Table               | Purpose                              |
+//! |---------------------|--------------------------------------|
+//! | `schema_version`    | Migration version tracking           |
+//! | `offsets`           | Committed position checkpoints       |
+//! | `snapshots`         | Table snapshot progress              |
+//! | `snapshot_chunks`   | Large-table chunking support         |
+//! | `schema_cache`      | Cached table schemas                 |
+//! | `skipped_positions` | Positions that failed to process     |
+//! | `instance_info`     | Key–value instance metadata          |
 
 mod migration;
 mod store;

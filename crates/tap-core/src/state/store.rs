@@ -23,8 +23,8 @@ use super::migration::migrate;
 /// A single committed offset (checkpoint) read from the store.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetRecord {
-    /// The committed LSN as a display string (e.g. `"0/16B37428"`).
-    pub committed_lsn: String,
+    /// The position string (e.g. `"0/16B37428"` for Postgres LSN).
+    pub position: String,
     /// Identifier of the transaction that produced this offset.
     pub tx_id: String,
     /// Wall-clock timestamp (milliseconds) when this offset was committed.
@@ -118,7 +118,7 @@ impl StateStore {
         // pre-existing databases, not freshly created ones.
         let db_existed = path.exists();
 
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
 
         // ---- Pragma setup ----
         conn.execute_batch(
@@ -148,7 +148,7 @@ impl StateStore {
         }
 
         // ---- Run migrations ----
-        migrate(&conn)?;
+        migrate(&mut conn)?;
 
         // ---- Exclusive lock to detect duplicate instances ----
         // Acquire an exclusive transaction briefly.  If another instance
@@ -169,12 +169,16 @@ impl StateStore {
     // -----------------------------------------------------------------------
 
     /// Persist a committed offset checkpoint.
+    ///
+    /// `adapter` identifies the replication plugin (e.g. `"pgoutput"`).
+    /// It is stored alongside the position for connector-agnostic tracking.
     pub fn write_offset(
         &self,
         lsn: &Lsn,
         tx_id: &str,
         ts_ms: u64,
         is_final: bool,
+        adapter: &str,
     ) -> Result<(), TapError> {
         let lsn_str = lsn.to_string();
         // Compute next sequence number
@@ -185,9 +189,16 @@ impl StateStore {
         )?;
 
         self.conn.execute(
-            "INSERT INTO offsets (committed_lsn, tx_id, ts_ms, sequence, is_final)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![lsn_str, tx_id, ts_ms as i64, sequence, is_final as i64],
+            "INSERT INTO offsets (position, tx_id, ts_ms, sequence, is_final, adapter)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                lsn_str,
+                tx_id,
+                ts_ms as i64,
+                sequence,
+                is_final as i64,
+                adapter
+            ],
         )?;
         Ok(())
     }
@@ -199,7 +210,7 @@ impl StateStore {
         // Prefer the latest final offset (resume from a clean checkpoint).
         // Fall back to the highest sequence overall.
         let result = self.conn.query_row(
-            "SELECT committed_lsn, tx_id, ts_ms, sequence, is_final
+            "SELECT position, tx_id, ts_ms, sequence, is_final
                  FROM offsets
                  WHERE is_final = 1
                  ORDER BY sequence DESC
@@ -207,7 +218,7 @@ impl StateStore {
             [],
             |row| {
                 Ok(OffsetRecord {
-                    committed_lsn: row.get(0)?,
+                    position: row.get(0)?,
                     tx_id: row.get(1)?,
                     ts_ms: row.get::<_, i64>(2)? as u64,
                     sequence: row.get(3)?,
@@ -221,14 +232,14 @@ impl StateStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Fallback: latest by sequence, regardless of is_final
                 let result = self.conn.query_row(
-                    "SELECT committed_lsn, tx_id, ts_ms, sequence, is_final
+                    "SELECT position, tx_id, ts_ms, sequence, is_final
                      FROM offsets
                      ORDER BY sequence DESC
                      LIMIT 1",
                     [],
                     |row| {
                         Ok(OffsetRecord {
-                            committed_lsn: row.get(0)?,
+                            position: row.get(0)?,
                             tx_id: row.get(1)?,
                             ts_ms: row.get::<_, i64>(2)? as u64,
                             sequence: row.get(3)?,
@@ -394,17 +405,17 @@ impl StateStore {
     // Skipped LSNs
     // -----------------------------------------------------------------------
 
-    /// Record an LSN that could not be processed.
+    /// Record a position that could not be processed (previously "skipped LSN").
     pub fn record_skipped_lsn(
         &self,
-        lsn: &str,
+        position: &str,
         tx_id: &str,
         error_message: &str,
     ) -> Result<(), TapError> {
         self.conn.execute(
-            "INSERT INTO skipped_lsns (lsn, tx_id, error_message)
+            "INSERT INTO skipped_positions (position, tx_id, error_message)
              VALUES (?1, ?2, ?3)",
-            params![lsn, tx_id, error_message],
+            params![position, tx_id, error_message],
         )?;
         Ok(())
     }
@@ -493,7 +504,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 1: Store initialisation creates all 6 tables
+    // Test 1: Store initialisation creates all 7 tables
     // ------------------------------------------------------------------
 
     #[test]
@@ -529,12 +540,16 @@ mod tests {
             "missing schema_version: {tables:?}"
         );
         assert!(
-            tables.contains(&"skipped_lsns".into()),
-            "missing skipped_lsns: {tables:?}"
+            tables.contains(&"skipped_positions".into()),
+            "missing skipped_positions: {tables:?}"
         );
         assert!(
             tables.contains(&"snapshots".into()),
             "missing snapshots: {tables:?}"
+        );
+        assert!(
+            tables.contains(&"snapshot_chunks".into()),
+            "missing snapshot_chunks: {tables:?}"
         );
 
         cleanup(&config);
@@ -551,7 +566,7 @@ mod tests {
 
         let lsn = Lsn::from_str("0/ABCD1234").unwrap();
         store
-            .write_offset(&lsn, "tx_001", 1_700_000_000_000, true)
+            .write_offset(&lsn, "tx_001", 1_700_000_000_000, true, "pgoutput")
             .expect("write offset");
 
         let record = store
@@ -559,7 +574,7 @@ mod tests {
             .expect("read offset")
             .expect("offset exists");
 
-        assert_eq!(record.committed_lsn, "0/ABCD1234");
+        assert_eq!(record.position, "0/ABCD1234");
         assert_eq!(record.tx_id, "tx_001");
         assert_eq!(record.ts_ms, 1_700_000_000_000);
         assert!(record.is_final);
@@ -577,13 +592,31 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
 
         store
-            .write_offset(&Lsn::from_str("0/11111111").unwrap(), "tx_1", 1000, false)
+            .write_offset(
+                &Lsn::from_str("0/11111111").unwrap(),
+                "tx_1",
+                1000,
+                false,
+                "pgoutput",
+            )
             .expect("write offset 1");
         store
-            .write_offset(&Lsn::from_str("0/22222222").unwrap(), "tx_2", 2000, false)
+            .write_offset(
+                &Lsn::from_str("0/22222222").unwrap(),
+                "tx_2",
+                2000,
+                false,
+                "pgoutput",
+            )
             .expect("write offset 2");
         store
-            .write_offset(&Lsn::from_str("0/33333333").unwrap(), "tx_3", 3000, true)
+            .write_offset(
+                &Lsn::from_str("0/33333333").unwrap(),
+                "tx_3",
+                3000,
+                true,
+                "pgoutput",
+            )
             .expect("write offset 3");
 
         let record = store
@@ -592,7 +625,7 @@ mod tests {
             .expect("offset exists");
 
         // Should return the final offset (is_final=1) with highest sequence
-        assert_eq!(record.committed_lsn, "0/33333333");
+        assert_eq!(record.position, "0/33333333");
         assert_eq!(record.tx_id, "tx_3");
         assert!(record.is_final);
 
@@ -609,10 +642,22 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
 
         store
-            .write_offset(&Lsn::from_str("0/AAAAAAAA").unwrap(), "tx_a", 1000, false)
+            .write_offset(
+                &Lsn::from_str("0/AAAAAAAA").unwrap(),
+                "tx_a",
+                1000,
+                false,
+                "pgoutput",
+            )
             .expect("write offset A");
         store
-            .write_offset(&Lsn::from_str("0/BBBBBBBB").unwrap(), "tx_b", 2000, false)
+            .write_offset(
+                &Lsn::from_str("0/BBBBBBBB").unwrap(),
+                "tx_b",
+                2000,
+                false,
+                "pgoutput",
+            )
             .expect("write offset B");
 
         // No is_final=1 offsets — should fall back to max sequence
@@ -621,7 +666,7 @@ mod tests {
             .expect("read offset")
             .expect("offset exists");
 
-        assert_eq!(record.committed_lsn, "0/BBBBBBBB");
+        assert_eq!(record.position, "0/BBBBBBBB");
 
         cleanup(&config);
     }
@@ -904,7 +949,7 @@ mod tests {
 
     #[test]
     fn test_store_skipped_lsns() {
-        let config = temp_config("skipped_lsns");
+        let config = temp_config("skipped_positions");
         let store = StateStore::open(&config).expect("open store");
 
         store
@@ -913,7 +958,7 @@ mod tests {
 
         let mut stmt = store
             .conn
-            .prepare("SELECT lsn, tx_id, error_message FROM skipped_lsns")
+            .prepare("SELECT position, tx_id, error_message FROM skipped_positions")
             .unwrap();
         let results: Vec<(String, String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -938,7 +983,7 @@ mod tests {
         let store = StateStore::open(&config).expect("open store");
         let lsn = Lsn::from_str("0/C0CAC01A").unwrap();
         store
-            .write_offset(&lsn, "tx_clear", 5000, true)
+            .write_offset(&lsn, "tx_clear", 5000, true, "pgoutput")
             .expect("write offset");
         assert!(store.read_last_offset().expect("read").is_some());
 
@@ -981,7 +1026,13 @@ mod tests {
             let lsn_hex = format!("0/{:08X}", 0x1000 + i);
             let lsn = Lsn::from_str(&lsn_hex).unwrap();
             store
-                .write_offset(&lsn, &format!("tx_{i}"), 1000 + i as u64, i == 2)
+                .write_offset(
+                    &lsn,
+                    &format!("tx_{i}"),
+                    1000 + i as u64,
+                    i == 2,
+                    "pgoutput",
+                )
                 .expect("write offset");
         }
 
@@ -997,11 +1048,11 @@ mod tests {
         // Also verify we can read a specific value
         let lsn: String = conn2
             .query_row(
-                "SELECT committed_lsn FROM offsets ORDER BY sequence DESC LIMIT 1",
+                "SELECT position FROM offsets ORDER BY sequence DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
-            .expect("read latest lsn");
+            .expect("read latest position");
         assert_eq!(lsn, format!("0/{:08X}", 0x1002));
 
         drop(conn2);

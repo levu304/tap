@@ -10,7 +10,14 @@ use tracing::debug;
 // SCRAM-SHA-256 helpers
 // ---------------------------------------------------------------------------
 
+use std::sync::atomic::AtomicU64;
+
+static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Generate a 12-byte random nonce (hex-encoded 24 hex chars).
+///
+/// Uses a timestamp+pid seed mixed with an atomic counter to guarantee
+/// uniqueness even when called multiple times within the same nanosecond.
 pub(crate) fn generate_nonce() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
@@ -18,7 +25,8 @@ pub(crate) fn generate_nonce() -> String {
         .expect("SystemTime before UNIX_EPOCH")
         .as_nanos();
     let pid = std::process::id();
-    let seed = (ts ^ pid as u128) as u64;
+    let counter = NONCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let seed = ((ts ^ pid as u128).wrapping_add(counter as u128)) as u64;
     format!("{:016x}{:08x}", ts, splitmix32(seed))
 }
 

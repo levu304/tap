@@ -433,7 +433,7 @@ impl Tap {
         if !lsn_str.is_empty() {
             if let Ok(lsn) = lsn_str.parse::<tap_core::postgres::Lsn>() {
                 if let Ok(store) = self.state_store.lock() {
-                    let _ = store.write_offset(&lsn, "", 0, true);
+                    let _ = store.write_offset(&lsn, "", 0, true, "pgoutput");
                 }
             }
         }

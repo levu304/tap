@@ -103,11 +103,8 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
             store.read_last_offset()?
         };
         if let Some(offset) = saved {
-            info!(
-                "Resuming from saved checkpoint LSN: {}",
-                offset.committed_lsn
-            );
-            Some(offset.committed_lsn.parse::<Lsn>()?)
+            info!("Resuming from saved checkpoint LSN: {}", offset.position);
+            Some(offset.position.parse::<Lsn>()?)
         } else {
             info!("No saved checkpoint found — will start from current position");
             None
@@ -381,7 +378,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                         // Persist offset checkpoint
                         if let (Some(lsn), Some(tx_id)) = (checkpoint_lsn, checkpoint_tx) {
                             let store = state.lock().await;
-                            if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false) {
+                            if let Err(e) = store.write_offset(&lsn, &tx_id, checkpoint_ts, false, &config.source.plugin) {
                                 warn!("Failed to persist offset checkpoint: {e}");
                             } else {
                                 last_committed_lsn = Some(lsn);
@@ -420,7 +417,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
     // fallback) — clean shutdown is distinguishable from a crash.
     if let Some(lsn) = last_committed_lsn {
         let store = state.lock().await;
-        if let Err(e) = store.write_offset(&lsn, "0", 0, true) {
+        if let Err(e) = store.write_offset(&lsn, "0", 0, true, &config.source.plugin) {
             warn!("Failed to persist final checkpoint: {e}");
         } else {
             info!("Final checkpoint written at {lsn}");
