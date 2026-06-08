@@ -7,6 +7,7 @@
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod mysql;
 pub mod postgres;
 pub mod replication;
 pub mod snapshot;

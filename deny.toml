@@ -15,6 +15,9 @@ ignore = [
     # RUSTSEC-2025-0020: PyString::from_object buffer overflow in pyo3.
     # Scaffold stubs don't call this API. Upgrade when v0.24+ is available.
     "RUSTSEC-2025-0020",
+    # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained.
+    # Transitive via mysql_async (mysql-common-derive). No safe upgrade available.
+    "RUSTSEC-2026-0173",
 ]
 # The lint level for crates with unmaintained advisory status
 # Accepted values: "all", "workspace", "transitive", "none"
@@ -30,6 +33,7 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "0BSD",
+    "Zlib",
 ]
 confidence-threshold = 0.8
 

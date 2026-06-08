@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use testcontainers::{Container, GenericImage, clients::Cli, core::WaitFor};
+use tokio::sync::Mutex as AsyncMutex;
 
 // Re-use the library's engine types so we can exercise them against a real
 // Postgres (or the TAP_TEST_DB CI database).
@@ -36,6 +37,24 @@ const PG_TAG: &str = "16-alpine";
 static DOCKER: OnceLock<Cli> = OnceLock::new();
 /// Lock to serialise container creation (testcontainers CLI isn't thread-safe).
 static DOCKER_LOCK: Mutex<()> = Mutex::new(());
+
+/// Async mutex to serialise all integration tests against the **shared**
+/// Postgres container.
+///
+/// Without this mutex, parallel tests leak WAL entries from concurrent INSERTs
+/// into each other's replication slots, causing spurious failures — for example
+/// `test_snapshot_produces_read_events` might see INSERTs committed by
+/// `test_snapshot_runner_captures_existing_rows` because its slot was created
+/// *after* the other test's writes were already in the WAL.
+static PG_MUTEX: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+/// Acquire the shared-Postgres serialisation lock.
+///
+/// Every integration test must `let _pg = pg_lock().await;` as its first
+/// statement to prevent concurrent WAL interleaving.
+async fn pg_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    PG_MUTEX.get_or_init(|| AsyncMutex::new(())).lock().await
+}
 
 fn docker() -> &'static Cli {
     DOCKER.get_or_init(|| Cli::default())
@@ -333,6 +352,7 @@ async fn test_harness_create_table_and_insert() {
 /// - After cleanup, both are removed.
 #[tokio::test]
 async fn test_create_replication_slot() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_slot");
     let slot = test_name("slot");
@@ -387,6 +407,7 @@ async fn test_create_replication_slot() {
 /// 3. Reads decoded WAL changes and asserts "INSERT" is present.
 #[tokio::test]
 async fn test_captures_insert_events() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_ins");
     let slot = test_name("slot_ins");
@@ -423,6 +444,7 @@ async fn test_captures_insert_events() {
 /// 4. Reads decoded WAL changes and asserts "UPDATE" is present.
 #[tokio::test]
 async fn test_captures_update_events() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_upd");
     let slot = test_name("slot_upd");
@@ -469,6 +491,7 @@ async fn test_captures_update_events() {
 /// 4. Reads decoded WAL changes and asserts "DELETE" is present.
 #[tokio::test]
 async fn test_captures_delete_events() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_del");
     let slot = test_name("slot_del");
@@ -515,6 +538,7 @@ async fn test_captures_delete_events() {
 /// 3. A subsequent INSERT is captured in the WAL, confirming the slot works.
 #[tokio::test]
 async fn test_snapshot_produces_read_events() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_snap");
     let slot = test_name("slot_snap");
@@ -577,6 +601,7 @@ async fn test_snapshot_produces_read_events() {
 /// and verifies both table names appear in the decoded WAL output.
 #[tokio::test]
 async fn test_multiple_tables() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table_a = test_name("t_multi_a");
     let table_b = test_name("t_multi_b");
@@ -635,6 +660,7 @@ async fn test_multiple_tables() {
 /// 6. Query the table to verify ALL data is intact.
 #[tokio::test]
 async fn test_graceful_shutdown() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_grace");
     let slot_a = test_name("slot_grace_a");
@@ -824,6 +850,7 @@ async fn test_state_store_snapshot_progress() {
 /// real Postgres table and emits Read events with the expected structure.
 #[tokio::test]
 async fn test_snapshot_runner_captures_existing_rows() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_snap_eng");
     let slot = test_name("slot_snap_eng");
@@ -942,6 +969,7 @@ async fn test_snapshot_runner_captures_existing_rows() {
 /// validate tables, and cleanly shut down.
 #[tokio::test]
 async fn test_pg_connection_api_lifecycle() {
+    let _pg = pg_lock().await;
     let pg = get_test_pg();
     let table = test_name("t_pg_api");
     let slot_name = test_name("slot_pg_api");

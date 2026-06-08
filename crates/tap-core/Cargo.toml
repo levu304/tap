@@ -29,6 +29,7 @@ axum.workspace = true
 http.workspace = true
 tokio-stream = "0.1"
 chrono = "0.4.44"
+mysql_async.workspace = true
 
 [dev-dependencies]
 testcontainers = { version = "0.15", features = ["tokio"] }

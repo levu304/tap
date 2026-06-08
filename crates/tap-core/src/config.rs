@@ -56,7 +56,18 @@ use crate::error::TapError;
 /// ```
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TapConfig {
+    /// Postgres source configuration.
+    ///
+    /// When using MySQL as the source, leave this as the default and provide
+    /// [`mysql_source`] instead.
+    #[serde(default)]
     pub source: SourceConfig,
+    /// MySQL source configuration (optional).
+    ///
+    /// If set, Postgres replication will not be used — tap connects to MySQL
+    /// and reads its binary log instead.
+    #[serde(default)]
+    pub mysql_source: Option<MySqlSourceConfig>,
     pub sink: SinkConfig,
     pub capture: CaptureConfig,
     pub snapshot: SnapshotConfig,
@@ -66,14 +77,17 @@ pub struct TapConfig {
 
 impl fmt::Debug for TapConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TapConfig")
-            .field("source", &self.source)
+        let mut d = f.debug_struct("TapConfig");
+        d.field("source", &self.source)
             .field("sink", &self.sink)
             .field("capture", &self.capture)
             .field("snapshot", &self.snapshot)
             .field("state", &self.state)
-            .field("logging", &self.logging)
-            .finish()
+            .field("logging", &self.logging);
+        if let Some(ref ms) = self.mysql_source {
+            d.field("mysql_source", ms);
+        }
+        d.finish()
     }
 }
 
@@ -93,7 +107,11 @@ impl TapConfig {
 
     /// Validates all sub-configurations.
     fn validate(&mut self) -> Result<(), TapError> {
-        self.source.validate()?;
+        if let Some(ref ms) = self.mysql_source {
+            ms.validate()?;
+        } else {
+            self.source.validate()?;
+        }
         self.snapshot.validate()?;
         Ok(())
     }
@@ -274,6 +292,123 @@ impl SourceConfig {
         }
         if let Err(e) = validate_identifier(&self.plugin, "source.plugin") {
             errors.push(e.to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TapError::Config(format!(
+                "config validation failed: {}",
+                errors.join("; ")
+            )))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MySQL source
+// ---------------------------------------------------------------------------
+
+/// MySQL binlog source connection and replication settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MySqlSourceConfig {
+    /// MySQL server hostname.
+    pub host: String,
+    /// MySQL server port.
+    pub port: u16,
+    /// Database name to connect to.
+    pub dbname: String,
+    /// Replication user name.
+    pub user: String,
+    /// Replication user password.
+    pub password: String,
+    /// Tables to capture (e.g. `["mydb.users", "mydb.orders"]`).
+    /// Empty means all tables.
+    #[serde(default)]
+    pub tables: Vec<String>,
+    /// Unique server ID for this replication client (must be > 0).
+    pub server_id: u32,
+    /// Resume from a specific binlog file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binlog_file: Option<String>,
+    /// Resume from a specific binlog offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binlog_offset: Option<u64>,
+}
+
+impl Default for MySqlSourceConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".into(),
+            port: 3306,
+            dbname: String::new(),
+            user: String::new(),
+            password: String::new(),
+            tables: Vec::new(),
+            server_id: 12345,
+            binlog_file: None,
+            binlog_offset: None,
+        }
+    }
+}
+
+impl fmt::Display for MySqlSourceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "mysql://{}:****@{}:{}/{}",
+            self.user, self.host, self.port, self.dbname,
+        )
+    }
+}
+
+impl MySqlSourceConfig {
+    /// Build an `OptsBuilder` for `mysql_async::Pool`.
+    ///
+    /// Each field is set separately, avoiding URL encoding issues with credentials
+    /// that contain metacharacters (`@`, `:`, `/`).
+    pub fn opts(&self) -> mysql_async::OptsBuilder {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(self.host.clone())
+            .tcp_port(self.port)
+            .user(Some(self.user.clone()))
+            .pass(Some(self.password.clone()))
+            .db_name(Some(self.dbname.clone()))
+    }
+
+    /// Build a connection URL with the password redacted for logging.
+    pub fn redacted_url(&self) -> String {
+        format!(
+            "mysql://{}:****@{}:{}/{}",
+            self.user, self.host, self.port, self.dbname,
+        )
+    }
+
+    /// Validate that all required fields are non-empty and server_id > 0.
+    pub fn validate(&self) -> Result<(), TapError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.host.is_empty() {
+            errors.push("mysqlSource.host is required".into());
+        }
+        if self.dbname.is_empty() {
+            errors.push("mysqlSource.dbname is required".into());
+        }
+        if self.user.is_empty() {
+            errors.push("mysqlSource.user is required".into());
+        }
+        if self.password.is_empty() {
+            errors.push("mysqlSource.password is required".into());
+        }
+        if self.server_id == 0 {
+            errors.push("mysqlSource.serverId must be > 0".into());
+        }
+
+        for (i, table) in self.tables.iter().enumerate() {
+            if let Err(e) = validate_identifier(table, &format!("mysqlSource.tables[{i}]")) {
+                errors.push(e.to_string());
+            }
         }
 
         if errors.is_empty() {

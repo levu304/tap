@@ -62,6 +62,9 @@ napi-derive = "2"
 # Python bindings
 pyo3 = "0.24"
 
+# MySQL
+mysql_async = { version = "0.37", features = ["binlog", "chrono"] }
+
 # v0.2.0 new dependencies
 tonic = "0.12"
 prost = "0.13"

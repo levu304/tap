@@ -171,7 +171,10 @@ async fn run_command(cli: Cli) -> Result<(), TapError> {
 fn exit_code_for_error(err: &TapError) -> u8 {
     match err {
         TapError::Config(_) => 1,
-        TapError::PostgresConnection(_) | TapError::PostgresConnectionRedacted(_) => 2,
+        TapError::PostgresConnection(_)
+        | TapError::PostgresConnectionRedacted(_)
+        | TapError::MySqlConnection(_)
+        | TapError::MySqlConnectionRedacted(_) => 2,
         TapError::ReplicationSlot(_) => 6,
         TapError::Io(_) => 4,
         TapError::Decode(_) | TapError::Snapshot(_) => 5,

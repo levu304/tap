@@ -604,8 +604,12 @@ impl Tap {
             flush_interval_ms: js.flush_interval_ms.map(|v| v as u64).unwrap_or(1_000),
         };
 
+        // Currently the JS SDK only supports Postgres sources.
+        let mysql_source = None;
+
         Ok(config::TapConfig {
             source,
+            mysql_source,
             sink,
             capture,
             snapshot: config::SnapshotConfig::default(),
