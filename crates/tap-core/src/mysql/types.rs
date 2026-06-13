@@ -15,15 +15,41 @@
 
 use mysql_async::Value;
 use mysql_async::consts::ColumnType;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+
+/// Serialise [`ColumnType`] as its `u8` discrimant so the field can
+/// participate in `#[derive(Serialize, Deserialize)]`.
+pub mod col_type_serde {
+    use mysql_async::consts::ColumnType;
+    use serde::de;
+    use serde::ser;
+    use serde::Deserialize;
+
+    pub fn serialize<S>(ct: &ColumnType, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serializer.serialize_u8(*ct as u8)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ColumnType, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let val = u8::deserialize(deserializer)?;
+        ColumnType::try_from(val).map_err(de::Error::custom)
+    }
+}
 
 /// Lightweight column metadata extracted from a MySQL result set or table
 /// map event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ColumnInfo {
     /// Column name.
     pub name: String,
     /// MySQL column type (e.g. `MYSQL_TYPE_LONG`, `MYSQL_TYPE_VARCHAR`).
+    #[serde(with = "col_type_serde")]
     pub col_type: ColumnType,
     /// Whether the column is unsigned (relevant for integer types).
     pub is_unsigned: bool,
