@@ -20,7 +20,7 @@
 
 pub use crate::mysql::connection::MySqlConnection;
 pub use crate::mysql::events::{
-    parse_binlog_event, process_binlog_event, MySqlBinlogEvent, MySqlChangeEvent,
+    MySqlBinlogEvent, MySqlChangeEvent, parse_binlog_event, process_binlog_event,
 };
 pub use crate::mysql::schema::SchemaCache;
 pub use crate::mysql::snapshot::run_mysql_parallel_snapshot;
