@@ -178,7 +178,9 @@ while [ "$elapsed" -lt "$CAPTURE_TIMEOUT" ]; do
         break
     fi
     # Check for snapshot completion in output
-    if grep -q "snapshot completed" "$TEMP_OUTPUT" 2>/dev/null; then
+    # NOTE: The actual log says "Snapshot complete:" (not "snapshot completed")
+    # due to structured tracing formatting in tap_core::snapshot::parallel
+    if grep -q "Snapshot complete:" "$TEMP_OUTPUT" 2>/dev/null; then
         found_snapshot=true
         echo "Found snapshot completion."
         break
@@ -224,21 +226,23 @@ if echo "$CAPTURE_OUTPUT" | grep -qi "fatal\|unhandled error"; then
 fi
 
 # 2. Check snapshot completion with expected row count
-if echo "$CAPTURE_OUTPUT" | grep -q "snapshot completed"; then
+# NOTE: The actual log says "Snapshot complete:" (structured tracing format:
+# "parallel snapshot complete ... total_rows=3 ..." or plain "Snapshot complete: 3 rows ...")
+if echo "$CAPTURE_OUTPUT" | grep -q "Snapshot complete:"; then
     # Extract snapshot line
-    SNAPSHOT_LINE=$(echo "$CAPTURE_OUTPUT" | grep "snapshot completed" | head -1)
+    SNAPSHOT_LINE=$(echo "$CAPTURE_OUTPUT" | grep "Snapshot complete:" | head -1)
     echo "Snapshot line: $SNAPSHOT_LINE"
 
-    # Extract row count from tracing structured format (rows_done=3) or JSON ("rows_done":3)
-    if echo "$SNAPSHOT_LINE" | grep -q "rows_done=3\|rows_done.:3"; then
+    # Extract row count (structured format uses total_rows=3; plain format says "3 rows")
+    if echo "$SNAPSHOT_LINE" | grep -q "total_rows=3\|total_rows.:3\|3 rows"; then
         echo "SUCCESS: Snapshot captured 3 rows as expected"
-    elif echo "$SNAPSHOT_LINE" | grep -q "rows_done"; then
+    elif echo "$SNAPSHOT_LINE" | grep -q "total_rows\|rows"; then
         echo "WARNING: Snapshot completed but row count does not match expected 3"
     else
         echo "WARNING: Could not extract row count from snapshot line"
     fi
 else
-    echo "FAILURE: No 'snapshot completed' message found in output"
+    echo "FAILURE: No 'Snapshot complete:' message found in output"
     echo "         Expected snapshot to capture 3 pre-inserted rows."
     if [ "$found_snapshot" = false ]; then
         echo "         The polling loop did not detect snapshot completion."

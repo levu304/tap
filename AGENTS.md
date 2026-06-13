@@ -55,6 +55,12 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
+
+# Audit logging (append-only, stored in .beads/interactions.jsonl)
+bd audit record --kind llm_call --model "..." --prompt "..." --response "..."
+bd audit record --kind tool_call --tool-name "..." --exit-code 0 --issue-id bd-42
+cat event.json | bd audit record --stdin
+bd audit label <entry-id> --label good --reason "Worked perfectly"
 ```
 
 ### Rules

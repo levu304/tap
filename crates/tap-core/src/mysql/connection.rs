@@ -5,9 +5,11 @@
 //! *   TCP/TLS connectivity validation
 //! *   MySQL server version check (5.7+ / 8.0+)
 //! *   Binlog format verification (`binlog_format = ROW`)
+//! *   Binary logging verification (`log_bin = ON`)
 //! *   `binlog_row_image = FULL` verification
+//! *   Binlog checksum verification
+//! *   Binlog retention warning
 //! *   Replication privileges check
-//! *   Binlog position parsing and formatting
 //!
 //! # Pre-flight checks
 //!
@@ -16,14 +18,18 @@
 //!
 //! 1. **Ping** — verifies TCP/TLS connectivity.
 //! 2. **Version** — ensures the server is MySQL 5.7+ or 8.0+.
-//! 3. **Binlog format** — confirms `binlog_format = ROW` (required for CDC).
-//! 4. **Row image** — confirms `binlog_row_image = FULL`.
-//! 5. **Privileges** — checks `REPLICATION SLAVE`, `REPLICATION CLIENT`, and
+//! 3. **Binary logging** — confirms `log_bin = ON` (required for CDC).
+//! 4. **Binlog format** — confirms `binlog_format = ROW` (required for CDC).
+//! 5. **Row image** — warns if `binlog_row_image != FULL`.
+//! 6. **Checksum** — confirms binlog checksums are enabled and using CRC32.
+//! 7. **Retention** — warns if binlog retention is below the configured
+//!    threshold (default 24 hours).
+//! 8. **Privileges** — checks `REPLICATION SLAVE`, `REPLICATION CLIENT`, and
 //!    table-level `SELECT` privileges on the target database.
 
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Pool};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::MySqlSourceConfig;
 use crate::error::TapError;
@@ -85,14 +91,17 @@ impl MySqlConnection {
     ///
     /// 1. **Ping** — connectivity via `CONNECTION_ID()`.
     /// 2. **Version** — MySQL 5.7+ or 8.0+ required.
-    /// 3. **Binlog format** — `binlog_format = ROW`.
-    /// 4. **Row image** — `binlog_row_image = FULL`.
-    /// 5. **Privileges** — replication + table SELECT.
+    /// 3. **Binary logging** — `log_bin = ON`.
+    /// 4. **Binlog format** — `binlog_format = ROW`.
+    /// 5. **Row image** — warns if `binlog_row_image != FULL`.
+    /// 6. **Checksum** — binlog checksums enabled (CRC32).
+    /// 7. **Retention** — warns if binlog retention < threshold.
+    /// 8. **Privileges** — replication + table SELECT.
     ///
     /// # Errors
     ///
     /// Returns [`TapError::MySqlConnection`] with a human-readable
-    /// description of the first check that fails.
+    /// description of the first fatal check that fails.
     pub async fn validate(&self) -> Result<(), TapError> {
         let mut conn = self.pool.get_conn().await.map_err(|e| {
             TapError::MySqlConnection(format!(
@@ -106,13 +115,22 @@ impl MySqlConnection {
         // 2. Version check
         self.check_version(&mut conn).await?;
 
-        // 3. Binlog format
+        // 3. Binary logging enabled
+        self.check_binary_logging(&mut conn).await?;
+
+        // 4. Binlog format
         self.check_binlog_format(&mut conn).await?;
 
-        // 4. Row image
-        self.check_row_image(&mut conn).await?;
+        // 5. Row image  (WARN only — before-images preferred but not required)
+        self.check_row_image(&mut conn).await;
 
-        // 5. Privileges
+        // 6. Binlog checksum
+        self.check_binlog_checksum(&mut conn).await?;
+
+        // 7. Binlog retention
+        self.check_binlog_retention(&mut conn).await;
+
+        // 8. Privileges
         self.check_privileges(&mut conn).await?;
 
         info!("MySQL pre-flight checks passed");
@@ -207,27 +225,151 @@ impl MySqlConnection {
         }
     }
 
-    /// Verify `binlog_row_image = FULL`.
-    async fn check_row_image(&self, conn: &mut Conn) -> Result<(), TapError> {
+    /// Verify `binlog_row_image = FULL` (WARN-only).
+    ///
+    /// MySQL must use `FULL` row image to capture before-images for UPDATE
+    /// and DELETE events.  This is **recommended** but not strictly required
+    /// — without it, UPDATE/DELETE events only carry the column values
+    /// after the change, so Merge and Upsert transformations cannot
+    /// reconstruct the old row.
+    async fn check_row_image(&self, conn: &mut Conn) {
         let image: Option<String> = conn
             .query_first("SELECT @@binlog_row_image")
             .await
             .map_err(|e| {
-                TapError::MySqlConnection(format!("failed to query binlog_row_image: {e}"))
-            })?;
+                warn!("failed to query binlog_row_image: {e}");
+            })
+            .unwrap_or(None);
 
         match image.as_deref() {
             Some("FULL") => {
                 info!("binlog_row_image = FULL OK");
+            }
+            Some(other) => {
+                warn!(
+                    "binlog_row_image is {other:?}, expected FULL \
+                     (set binlog_row_image=FULL to capture before-images)"
+                );
+            }
+            None => {
+                warn!("binlog_row_image is not set (expected FULL)");
+            }
+        }
+    }
+
+    /// Verify `log_bin = ON`.
+    ///
+    /// CDC is impossible without binary logging.  This is a fatal check
+    /// because the entire capture session depends on it.
+    async fn check_binary_logging(&self, conn: &mut Conn) -> Result<(), TapError> {
+        let log_bin: Option<String> = conn
+            .query_first("SELECT @@log_bin")
+            .await
+            .map_err(|e| TapError::MySqlConnection(format!("failed to query log_bin: {e}")))?;
+
+        match log_bin.as_deref() {
+            Some("1" | "ON") => {
+                info!("binary logging enabled (log_bin = ON)");
                 Ok(())
             }
             Some(other) => Err(TapError::MySqlConnection(format!(
-                "binlog_row_image is {other:?}, expected FULL \
-                 (set binlog_row_image=FULL to capture before-images)"
+                "binary logging is disabled (log_bin = {other:?}); \
+                 set log_bin = ON in my.cnf and restart MySQL"
             ))),
             None => Err(TapError::MySqlConnection(
-                "binlog_row_image is not set".into(),
+                "binary logging is not configured (log_bin is NULL); \
+                 set log_bin = ON in my.cnf and restart MySQL"
+                    .into(),
             )),
+        }
+    }
+
+    /// Verify `@@binlog_checksum` is set to CRC32.
+    ///
+    /// MySQL 5.6+ supports CRC32 checksums in binlog events.  When checksums
+    /// are disabled, corrupted events may go undetected.  This is a **fatal**
+    /// check because the tap assumes CRC32 for event integrity verification.
+    async fn check_binlog_checksum(&self, conn: &mut Conn) -> Result<(), TapError> {
+        let checksum: Option<String> =
+            conn.query_first("SELECT @@binlog_checksum")
+                .await
+                .map_err(|e| {
+                    TapError::MySqlConnection(format!("failed to query binlog_checksum: {e}"))
+                })?;
+
+        match checksum.as_deref() {
+            Some("CRC32") => {
+                info!("binlog_checksum = CRC32 OK");
+                Ok(())
+            }
+            Some(other) => Err(TapError::MySqlConnection(format!(
+                "binlog_checksum is {other:?}, expected CRC32 \
+                 (set binlog_checksum = CRC32)"
+            ))),
+            None => Err(TapError::MySqlConnection(
+                "binlog_checksum is NONE; set binlog_checksum = CRC32 \
+                 for event integrity verification"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Verify binlog retention is configured with a reasonable threshold.
+    ///
+    /// Checks `binlog_expire_logs_seconds` (MySQL 8.0+) or
+    /// `expire_logs_days` (MySQL 5.7) and warns when retention is
+    /// below the configured threshold.
+    async fn check_binlog_retention(&self, conn: &mut Conn) {
+        // Try binlog_expire_logs_seconds first (MySQL 8.0+).
+        let expire_secs: Option<u64> = conn
+            .query_first("SELECT @@binlog_expire_logs_seconds")
+            .await
+            .map_err(|e| {
+                warn!("failed to query binlog_expire_logs_seconds: {e}");
+            })
+            .unwrap_or(None);
+
+        if let Some(secs) = expire_secs {
+            let threshold = self.config.binlog_retention_warning_threshold;
+            if secs < threshold {
+                warn!(
+                    binlog_expire_logs_seconds = secs,
+                    threshold = threshold,
+                    "binlog retention ({secs}s) is below warning threshold ({threshold}s); \
+                     short retention can cause data loss during long catch-up periods"
+                );
+            } else {
+                info!(binlog_expire_logs_seconds = secs, "binlog retention OK");
+            }
+            return;
+        }
+
+        // Fallback to expire_logs_days (MySQL 5.7).
+        let expire_days: Option<u64> = conn
+            .query_first("SELECT @@expire_logs_days")
+            .await
+            .map_err(|e| {
+                warn!("failed to query expire_logs_days: {e}");
+            })
+            .unwrap_or(None);
+
+        if let Some(days) = expire_days {
+            let threshold_days = self.config.binlog_retention_warning_threshold / 86_400;
+            if days < threshold_days {
+                warn!(
+                    expire_logs_days = days,
+                    threshold_days = threshold_days,
+                    "binlog retention ({days}d) is below warning threshold ({threshold_days}d); \
+                     short retention can cause data loss during long catch-up periods"
+                );
+            } else {
+                info!(expire_logs_days = days, "binlog retention OK");
+            }
+        } else {
+            warn!(
+                "neither binlog_expire_logs_seconds nor expire_logs_days is set; \
+                 binlog files may accumulate indefinitely"
+            );
         }
     }
 
@@ -382,5 +524,45 @@ mod tests {
         // OptsBuilder should construct without errors regardless of
         // credential content — it sets each field separately.
         let _opts = config.opts();
+    }
+
+    /// Default binlog retention threshold is 24 hours (86400 seconds).
+    #[test]
+    fn test_default_binlog_retention_threshold() {
+        let config = MySqlSourceConfig::default();
+        assert_eq!(config.binlog_retention_warning_threshold, 86_400);
+    }
+
+    /// Binlog retention threshold is configurable via struct literal.
+    #[test]
+    fn test_custom_binlog_retention_threshold() {
+        let config = MySqlSourceConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            dbname: "test".into(),
+            user: "root".into(),
+            password: "secret".into(),
+            server_id: 42,
+            binlog_retention_warning_threshold: 3600, // 1 hour
+            ..Default::default()
+        };
+        assert_eq!(config.binlog_retention_warning_threshold, 3600);
+        assert!(config.validate().is_ok());
+    }
+
+    /// Setting threshold to 0 disables the retention warning.
+    #[test]
+    fn test_zero_threshold_disables_retention_warning() {
+        let config = MySqlSourceConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            dbname: "test".into(),
+            user: "root".into(),
+            password: "secret".into(),
+            server_id: 42,
+            binlog_retention_warning_threshold: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.binlog_retention_warning_threshold, 0);
     }
 }

@@ -61,6 +61,10 @@ pub struct SchemaRecord {
     pub schema_hash: String,
 }
 
+/// A single snapshot-chunk row from the state store:
+/// `(chunk_index, chunk_start, chunk_end, status)`.
+pub type ChunkRow = (u32, Option<String>, Option<String>, String);
+
 // ---------------------------------------------------------------------------
 // StateStore
 // ---------------------------------------------------------------------------
@@ -399,6 +403,164 @@ impl StateStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Chunk operations (parallel snapshot)
+    // -----------------------------------------------------------------------
+
+    /// Insert a new chunk record for a parallel snapshot.
+    pub fn write_chunk(
+        &self,
+        table_name: &str,
+        snapshot_id: &str,
+        chunk_index: u32,
+        chunk_start: Option<&str>,
+        chunk_end: Option<&str>,
+    ) -> Result<(), TapError> {
+        self.conn.execute(
+            "INSERT INTO snapshot_chunks
+                (table_name, snapshot_id, chunk_index, chunk_start, chunk_end, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')
+             ON CONFLICT(snapshot_id, table_name, chunk_index) DO NOTHING",
+            params![table_name, snapshot_id, chunk_index, chunk_start, chunk_end],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a chunk as in_progress and set the started_at timestamp.
+    pub fn start_chunk(
+        &self,
+        snapshot_id: &str,
+        table_name: &str,
+        chunk_index: u32,
+    ) -> Result<(), TapError> {
+        self.conn.execute(
+            "UPDATE snapshot_chunks
+             SET status = 'in_progress',
+                 started_at = datetime('now')
+             WHERE snapshot_id = ?1 AND table_name = ?2 AND chunk_index = ?3",
+            params![snapshot_id, table_name, chunk_index],
+        )?;
+        Ok(())
+    }
+
+    /// Update the row count for a chunk (intermediate progress).
+    pub fn update_chunk_rows(
+        &self,
+        snapshot_id: &str,
+        table_name: &str,
+        chunk_index: u32,
+        rows_count: u64,
+    ) -> Result<(), TapError> {
+        self.conn.execute(
+            "UPDATE snapshot_chunks
+             SET rows_count = ?4
+             WHERE snapshot_id = ?1 AND table_name = ?2 AND chunk_index = ?3",
+            params![snapshot_id, table_name, chunk_index, rows_count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a chunk as completed with final row count.
+    pub fn complete_chunk(
+        &self,
+        snapshot_id: &str,
+        table_name: &str,
+        chunk_index: u32,
+        rows_count: u64,
+    ) -> Result<(), TapError> {
+        self.conn.execute(
+            "UPDATE snapshot_chunks
+             SET status = 'completed',
+                 rows_count = ?4,
+                 completed_at = datetime('now')
+             WHERE snapshot_id = ?1 AND table_name = ?2 AND chunk_index = ?3",
+            params![snapshot_id, table_name, chunk_index, rows_count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a chunk as failed with an error message.
+    pub fn fail_chunk(
+        &self,
+        snapshot_id: &str,
+        table_name: &str,
+        chunk_index: u32,
+        error_message: &str,
+    ) -> Result<(), TapError> {
+        self.conn.execute(
+            "UPDATE snapshot_chunks
+             SET status = 'failed',
+                 error_message = ?4,
+                 completed_at = datetime('now')
+             WHERE snapshot_id = ?1 AND table_name = ?2 AND chunk_index = ?3",
+            params![snapshot_id, table_name, chunk_index, error_message],
+        )?;
+        Ok(())
+    }
+
+    /// Get all chunks for a snapshot+table (any status).
+    /// Returns `(chunk_index, chunk_start, chunk_end, status)` tuples.
+    pub fn get_table_chunks(
+        &self,
+        snapshot_id: &str,
+        table_name: &str,
+    ) -> Result<Vec<ChunkRow>, TapError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_index, chunk_start, chunk_end, status
+             FROM snapshot_chunks
+             WHERE snapshot_id = ?1 AND table_name = ?2
+             ORDER BY chunk_index",
+        )?;
+        let rows = stmt
+            .query_map(params![snapshot_id, table_name], |row| {
+                Ok((
+                    row.get::<_, i32>(0)? as u32,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Count completed chunks for a snapshot.
+    pub fn count_completed_chunks(&self, snapshot_id: &str) -> Result<u64, TapError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM snapshot_chunks
+             WHERE snapshot_id = ?1 AND status = 'completed'",
+            params![snapshot_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Count chunks that are NOT completed for a snapshot run.
+    ///
+    /// Returns 0 when the run is either fully completed or has no chunks
+    /// at all (both cases mean "no resume needed").
+    pub fn count_incomplete_chunks(&self, snapshot_id: &str) -> Result<u64, TapError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM snapshot_chunks
+             WHERE snapshot_id = ?1 AND status != 'completed'",
+            params![snapshot_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Get the total row count across all completed chunks for a snapshot.
+    pub fn snapshot_chunk_total_rows(&self, snapshot_id: &str) -> Result<u64, TapError> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(rows_count), 0) FROM snapshot_chunks
+             WHERE snapshot_id = ?1 AND status = 'completed'",
+            params![snapshot_id],
+            |row| row.get(0),
+        )?;
+        Ok(total as u64)
     }
 
     // -----------------------------------------------------------------------
@@ -1056,6 +1218,61 @@ mod tests {
         assert_eq!(lsn, format!("0/{:08X}", 0x1002));
 
         drop(conn2);
+        cleanup(&config);
+    }
+
+    // ------------------------------------------------------------------
+    // Test 17: count_incomplete_chunks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_store_count_incomplete_chunks() {
+        let config = temp_config("incomplete_chunks");
+        let store = StateStore::open(&config).expect("open store");
+
+        // No chunks yet → 0 incomplete
+        assert_eq!(
+            store.count_incomplete_chunks("run_1").expect("count empty"),
+            0
+        );
+
+        // Insert a completed chunk
+        store
+            .write_chunk("public.t", "run_1", 0, Some("1"), Some("10"))
+            .expect("write chunk 0");
+        store
+            .complete_chunk("run_1", "public.t", 0, 9)
+            .expect("complete chunk 0");
+
+        // Still 0 incomplete
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_1")
+                .expect("count after complete"),
+            0
+        );
+
+        // Insert a pending chunk (ON CONFLICT DO NOTHING, so different index)
+        store
+            .write_chunk("public.t", "run_1", 1, Some("10"), Some("20"))
+            .expect("write chunk 1");
+
+        // Now 1 incomplete
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_1")
+                .expect("count after pending"),
+            1
+        );
+
+        // Different run_id → 0
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_other")
+                .expect("count other"),
+            0
+        );
+
         cleanup(&config);
     }
 }

@@ -55,11 +55,6 @@ use tracing::{debug, warn};
 
 use crate::error::TapError;
 
-// ---------------------------------------------------------------------------
-// Re-export the event Lsn with an alias to avoid shadowing postgres::Lsn
-// ---------------------------------------------------------------------------
-
-use crate::event::Lsn as EventLsn;
 use crate::event::{ChangeEvent, Operation, SourceMetadata};
 use crate::postgres::Lsn as PgLsn;
 
@@ -426,7 +421,6 @@ impl PgoutputDecoder {
 
         let ts_ms = pg_timestamp_to_unix_ms(ts_us);
         let lsn_display = commit_lsn.to_string();
-        let event_lsn = EventLsn(lsn_display);
 
         let tx_id = self
             .current_tx_id
@@ -440,13 +434,15 @@ impl PgoutputDecoder {
                 db: self.db_name.clone(),
                 schema: pending.schema,
                 table: pending.table,
-                lsn: event_lsn.clone(),
+                lsn: Some(lsn_display.clone()),
+                binlog_file: None,
+                binlog_offset: None,
                 tx_id: tx_id.clone(),
                 ts_ms,
                 snapshot: None,
             };
 
-            let id = format!("{}:{}:{}", event_lsn, tx_id, idx);
+            let id = format!("{}:{}:{}", &lsn_display, tx_id, idx);
 
             events.push(ChangeEvent {
                 op: pending.op,
@@ -660,13 +656,19 @@ impl WalDecoder for PgoutputDecoder {
                     db: self.db_name.clone(),
                     schema: pending.schema,
                     table: pending.table,
-                    lsn: EventLsn(self.current_lsn.map(|l| l.to_string()).unwrap_or_default()),
+                    lsn: self.current_lsn.map(|l| l.to_string()),
+                    binlog_file: None,
+                    binlog_offset: None,
                     tx_id: self.current_tx_id.clone().unwrap_or_default(),
                     ts_ms: self.current_ts_ms.unwrap_or(0),
                     snapshot: None,
                 };
                 let ts_ms = source.ts_ms;
-                let id = format!("{}:{}:flush", source.lsn, source.tx_id);
+                let id = format!(
+                    "{}:{}:flush",
+                    source.lsn.as_deref().unwrap_or(""),
+                    source.tx_id
+                );
                 ChangeEvent {
                     op: pending.op,
                     before: pending.before,
@@ -792,21 +794,22 @@ impl WalDecoder for Wal2JsonDecoder {
             };
 
             // Build the LSN from available data — wal2json doesn't carry
-            // per-event LSNs, so we use an empty string.
-            let event_lsn = EventLsn(String::new());
+            // per-event LSNs, so we use None.
             let source = SourceMetadata {
                 db: self.db_name.clone(),
                 schema,
                 table: table.to_string(),
-                lsn: event_lsn.clone(),
+                lsn: None,
+                binlog_file: None,
+                binlog_offset: None,
                 tx_id: xid.clone(),
                 ts_ms,
                 snapshot: None,
             };
             let id = if xid.is_empty() {
-                format!("{}:{}", event_lsn, uuid::Uuid::new_v4())
+                uuid::Uuid::new_v4().to_string()
             } else {
-                format!("{}:{}", event_lsn, xid)
+                xid.clone()
             };
 
             events.push(ChangeEvent {

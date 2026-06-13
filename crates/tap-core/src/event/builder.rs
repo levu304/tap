@@ -57,7 +57,9 @@ impl ChangeEventBuilder {
 ///     db: "mydb".into(),
 ///     schema: "public".into(),
 ///     table: "users".into(),
-///     lsn: "0/1234567".parse().unwrap(),
+///     lsn: Some("0/1234567".into()),
+///     binlog_file: None,
+///     binlog_offset: None,
 ///     tx_id: "42".into(),
 ///     ts_ms: 1_700_000_000_000,
 ///     snapshot: None,
@@ -149,16 +151,37 @@ impl ChangeEventBuilder {
     }
 
     /// Generates a unique event identifier from source metadata.
+    ///
+    /// ## Determinism
+    ///
+    /// | Source | Fields used | Format |
+    /// |--------|-------------|--------|
+    /// | Postgres (streaming) | `lsn` + `tx_id` | `{lsn}:{tx_id}` |
+    /// | MySQL (streaming) | `binlog_file` + `binlog_offset` + `tx_id` | `{file}:{offset}:{tx_id}` |
+    /// | Snapshot (any) | random UUID suffix | `snap:{schema}.{table}:{uuid}` |
+    /// | Fallback | random UUID | bare UUID |
+    ///
+    /// Deterministic IDs are essential for downstream deduplication — the same
+    /// source position always produces the same event ID, enabling safe retry
+    /// and exactly-once semantics.
     fn generate_id(source: &SourceMetadata) -> String {
         match source.snapshot {
             Some(true) => {
+                // Snapshot IDs are unique-per-run; determinism not required.
                 let short = Uuid::new_v4().to_string();
                 format!("snap:{}.{}:{}", source.schema, source.table, short)
             }
             _ => {
-                if !source.lsn.is_empty() {
-                    format!("{}:{}", source.lsn, source.tx_id)
+                if let Some(ref lsn) = source.lsn {
+                    // Postgres: deterministic from WAL position + transaction ID
+                    format!("{}:{}", lsn, source.tx_id)
+                } else if let (Some(ref file), Some(offset)) =
+                    (source.binlog_file.clone(), source.binlog_offset)
+                {
+                    // MySQL: deterministic from binlog position + transaction ID
+                    format!("{}:{}:{}", file, offset, source.tx_id)
                 } else {
+                    // No position metadata available (should not occur in practice).
                     Uuid::new_v4().to_string()
                 }
             }
@@ -174,7 +197,6 @@ impl Default for ChangeEventBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::envelope::Lsn;
     use super::*;
 
     #[test]
@@ -183,7 +205,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/1".into()),
+            lsn: Some("0/1".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "1".into(),
             ts_ms: 100,
             snapshot: None,
@@ -211,7 +235,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn::default(),
+            lsn: None,
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -227,7 +253,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/ABCDEF".into()),
+            lsn: Some("0/ABCDEF".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "123".into(),
             ts_ms: 0,
             snapshot: None,
@@ -248,7 +276,9 @@ mod tests {
             db: "db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: Lsn("0/0".into()),
+            lsn: Some("0/0".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "0".into(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -269,7 +299,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn::default(),
+            lsn: None,
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: None,

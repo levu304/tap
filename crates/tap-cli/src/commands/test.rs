@@ -105,7 +105,7 @@ fn validate_fixture(path: &str) -> Result<(), TapError> {
         op = event.op.as_str(),
         schema = event.source.schema,
         table = event.source.table,
-        lsn = event.source.lsn,
+        lsn = event.source.lsn.as_deref().unwrap_or("N/A"),
     );
 
     Ok(())

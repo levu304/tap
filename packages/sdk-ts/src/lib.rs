@@ -43,7 +43,7 @@ impl From<&tap_core::event::SourceMetadata> for JsSourceMetadata {
             db: s.db.clone(),
             schema: s.schema.clone(),
             table: s.table.clone(),
-            lsn: s.lsn.to_string(),
+            lsn: s.lsn.clone().unwrap_or_default(),
             tx_id: s.tx_id.clone(),
             ts_ms: s.ts_ms as f64,
             snapshot: s.snapshot,
@@ -803,10 +803,12 @@ mod tests {
             db: "mydb".into(),
             schema: "public".into(),
             table: "orders".into(),
-            lsn: "0/DEADBEEF".parse().unwrap(),
+            lsn: Some("0/DEADBEEF".into()),
             tx_id: "tx99".into(),
             ts_ms: 1234,
             snapshot: Some(true),
+            binlog_file: None,
+            binlog_offset: None,
         };
         let js: JsSourceMetadata = (&src).into();
         assert_eq!(js.db, "mydb");
@@ -824,10 +826,12 @@ mod tests {
             db: "d".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: "0/1".parse().unwrap(),
+            lsn: Some("0/1".into()),
             tx_id: "1".into(),
             ts_ms: 100,
             snapshot: None,
+            binlog_file: None,
+            binlog_offset: None,
         };
         let core = ChangeEvent {
             op: tap_core::event::Operation::Update,

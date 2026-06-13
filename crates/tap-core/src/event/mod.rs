@@ -7,4 +7,4 @@ pub mod envelope;
 
 pub use builder::ChangeEventBuilder;
 pub use envelope::operation_code;
-pub use envelope::{ChangeEvent, Lsn, Operation, SourceMetadata};
+pub use envelope::{ChangeEvent, Operation, SourceMetadata};
