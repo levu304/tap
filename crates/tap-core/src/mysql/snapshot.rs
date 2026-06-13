@@ -31,7 +31,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{MySqlSourceConfig, SnapshotConfig};
 use crate::error::TapError;
-use crate::event::{ChangeEvent, Lsn, Operation, SourceMetadata, builder::ChangeEventBuilder};
+use crate::event::{ChangeEvent, Operation, SourceMetadata, builder::ChangeEventBuilder};
 use crate::snapshot::chunker::{PkRange, SnapshotChunk, generate_chunks};
 use crate::snapshot::runner::TableInfo;
 
@@ -66,7 +66,6 @@ pub async fn run_mysql_parallel_snapshot(
 
     let (binlog_file, binlog_offset) = acquire_binlog_position(&mut keeper).await?;
     let snapshot_id = format!("{binlog_file}:{binlog_offset}");
-    let lsn = Lsn(binlog_offset.to_string());
     drop(keeper);
 
     info!(
@@ -225,14 +224,23 @@ pub async fn run_mysql_parallel_snapshot(
         }
         let pool = pool.clone();
         let event_tx = event_tx.clone();
-        let lsn = lsn.clone();
+        let binlog_file = binlog_file.clone();
         let table = assignment.table;
         let pks = assignment.pks;
 
         let handle: tokio::task::JoinHandle<Result<(u64, u64), TapError>> =
             tokio::spawn(async move {
-                mysql_worker_main(pool, &table, &pks, assignment.rx, event_tx, lsn, batch_size)
-                    .await
+                mysql_worker_main(
+                    pool,
+                    &table,
+                    &pks,
+                    assignment.rx,
+                    event_tx,
+                    &binlog_file,
+                    binlog_offset,
+                    batch_size,
+                )
+                .await
             });
         handles.push((wi, handle));
     }
@@ -413,13 +421,15 @@ async fn mysql_detect_pk_columns(
 // Worker
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn mysql_worker_main(
     pool: Arc<Pool>,
     table: &TableInfo,
     pks: &[String],
     mut chunk_rx: UnboundedReceiver<SnapshotChunk>,
     event_tx: Arc<UnboundedSender<ChangeEvent>>,
-    lsn: Lsn,
+    binlog_file: &str,
+    binlog_offset: u64,
     batch_size: u32,
 ) -> Result<(u64, u64), TapError> {
     let mut conn = pool
@@ -435,8 +445,17 @@ async fn mysql_worker_main(
     let mut chunks_processed: u64 = 0;
 
     while let Some(chunk) = chunk_rx.recv().await {
-        let rows =
-            mysql_scan_chunk(&mut conn, table, pks, &chunk, &event_tx, &lsn, batch_size).await?;
+        let rows = mysql_scan_chunk(
+            &mut conn,
+            table,
+            pks,
+            &chunk,
+            &event_tx,
+            binlog_file,
+            binlog_offset,
+            batch_size,
+        )
+        .await?;
         total_rows += rows;
         chunks_processed += 1;
     }
@@ -452,13 +471,15 @@ async fn mysql_worker_main(
 // Chunk scanning
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn mysql_scan_chunk(
     conn: &mut Conn,
     table: &TableInfo,
     pks: &[String],
     chunk: &SnapshotChunk,
     event_tx: &UnboundedSender<ChangeEvent>,
-    lsn: &Lsn,
+    binlog_file: &str,
+    binlog_offset: u64,
     batch_size: u32,
 ) -> Result<u64, TapError> {
     let where_clause = mysql_where_clause(pks, chunk);
@@ -486,7 +507,7 @@ async fn mysql_scan_chunk(
     loop {
         match result.next().await {
             Ok(Some(r)) => {
-                emit_mysql_row_event(&r, table, event_tx, lsn)?;
+                emit_mysql_row_event(&r, table, event_tx, binlog_file, binlog_offset)?;
                 row_count += 1;
             }
             Ok(None) => break,
@@ -537,7 +558,8 @@ fn emit_mysql_row_event(
     row: &MyRow,
     table: &TableInfo,
     event_tx: &UnboundedSender<ChangeEvent>,
-    lsn: &Lsn,
+    binlog_file: &str,
+    binlog_offset: u64,
 ) -> Result<(), TapError> {
     let after = mysql_row_to_json_object(row);
     let now_ms = SystemTime::now()
@@ -549,7 +571,9 @@ fn emit_mysql_row_event(
         db: table.schema.clone(),
         schema: String::new(),
         table: table.name.clone(),
-        lsn: lsn.clone(),
+        lsn: None,
+        binlog_file: Some(binlog_file.to_string()),
+        binlog_offset: Some(binlog_offset),
         tx_id: "0".into(),
         ts_ms: now_ms,
         snapshot: Some(true),

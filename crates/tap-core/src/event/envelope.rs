@@ -1,43 +1,9 @@
-//! Core event types — `ChangeEvent`, `SourceMetadata`, `Operation`, and `Lsn`.
+//! Core event types — `ChangeEvent`, `SourceMetadata`, `Operation`.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::str::FromStr;
 
 use crate::error::TapError;
-
-// ---------------------------------------------------------------------------
-// LSN newtype
-// ---------------------------------------------------------------------------
-
-/// A Postgres WAL Log Sequence Number.
-///
-/// Wraps the canonical hex-string representation (e.g. `0/1234567`).
-/// Currently a lightweight string wrapper; ordering and full parsing
-/// will be added when the replication module (P3) consumes this type.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
-pub struct Lsn(pub String);
-
-impl fmt::Display for Lsn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for Lsn {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Lsn(s.to_string()))
-    }
-}
-
-impl Lsn {
-    /// Returns `true` when the LSN is the empty string.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -58,7 +24,9 @@ impl Lsn {
 ///     db: "mydb".into(),
 ///     schema: "public".into(),
 ///     table: "users".into(),
-///     lsn: "0/1234567".parse().unwrap(),
+///     lsn: Some("0/1234567".into()),
+///     binlog_file: None,
+///     binlog_offset: None,
 ///     tx_id: "12345".into(),
 ///     ts_ms: 1_700_000_000_000,
 ///     snapshot: None,
@@ -99,21 +67,34 @@ pub struct ChangeEvent {
 ///
 /// Mirrors the `source` block of a Debezium message so downstream
 /// consumers can map events back to a specific database, schema,
-/// table, and Postgres LSN position.
+/// table, and replication position.
+///
+/// For Postgres sources `lsn` carries the WAL Log Sequence Number
+/// (e.g. `"0/1234567"`).  For MySQL sources `binlog_file` + `binlog_offset`
+/// carry the binlog position instead, and `lsn` is `None`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SourceMetadata {
     /// Source database name.
     pub db: String,
-    /// Source schema name.
+    /// Source schema name (empty for MySQL).
     pub schema: String,
     /// Source table name.
     pub table: String,
-    /// Postgres WAL Log Sequence Number (e.g. `0/1234567`).
-    #[serde(default, skip_serializing_if = "Lsn::is_empty")]
-    pub lsn: Lsn,
+    /// Postgres WAL Log Sequence Number (e.g. `"0/1234567"`).
+    /// `None` for MySQL sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsn: Option<String>,
+    /// MySQL binlog file name (e.g. `"mysql-bin.000042"`).
+    /// `None` for Postgres sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binlog_file: Option<String>,
+    /// MySQL binlog byte offset.
+    /// `None` for Postgres sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binlog_offset: Option<u64>,
     /// Identifier of the transaction that produced the change.
     pub tx_id: String,
-    /// Timestamp (milliseconds since UNIX epoch) of the change in Postgres.
+    /// Timestamp (milliseconds since UNIX epoch) of the change in the source database.
     pub ts_ms: u64,
     /// Whether this event was produced by a snapshot.  `None` or `Some(false)`
     /// means streaming replication.
@@ -247,7 +228,9 @@ mod tests {
             db: "test_db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: Lsn("0/ABCDEF".into()),
+            lsn: Some("0/ABCDEF".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "42".into(),
             ts_ms: 1_700_000_000_000,
             snapshot: None,
@@ -259,7 +242,7 @@ mod tests {
             after: Some(serde_json::json!({"id": 1, "name": "Alice"})),
             source: source.clone(),
             ts_ms: 1_700_000_000_001,
-            id: format!("{}:{}", source.lsn, source.tx_id),
+            id: format!("{}:{}", source.lsn.as_deref().unwrap_or(""), source.tx_id),
         };
 
         let json = serde_json::to_string(&event).expect("serialize");
@@ -276,7 +259,9 @@ mod tests {
             db: "test_db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: Lsn("0/0".into()),
+            lsn: Some("0/0".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "0".into(),
             ts_ms: 1_700_000_000_000,
             snapshot: Some(true),
@@ -299,12 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn test_source_metadata_skips_none_snapshot() {
+    fn test_source_metadata_skips_none_fields() {
         let source = SourceMetadata {
             db: "d".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/1".into()),
+            lsn: Some("0/1".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "1".into(),
             ts_ms: 0,
             snapshot: None,
@@ -312,15 +299,19 @@ mod tests {
 
         let json = serde_json::to_string(&source).expect("serialize");
         assert!(!json.contains("snapshot"));
+        assert!(!json.contains("binlog_file"));
+        assert!(!json.contains("binlog_offset"));
     }
 
     #[test]
-    fn test_source_metadata_serializes_some_snapshot() {
+    fn test_source_metadata_serializes_some_fields() {
         let source = SourceMetadata {
             db: "d".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/1".into()),
+            lsn: None,
+            binlog_file: Some("mysql-bin.000042".into()),
+            binlog_offset: Some(12345),
             tx_id: "1".into(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -328,20 +319,8 @@ mod tests {
 
         let json = serde_json::to_string(&source).expect("serialize");
         assert!(json.contains("snapshot"));
-    }
-
-    #[test]
-    fn test_lsn_newtype() {
-        let lsn: Lsn = "0/ABCDEF".parse().unwrap();
-        assert_eq!(format!("{lsn}"), "0/ABCDEF");
-        assert!(!lsn.is_empty());
-
-        let empty = Lsn::default();
-        assert!(empty.is_empty());
-
-        // Lsn ordering (lexicographic for now)
-        assert!(Lsn("0/1".into()) < Lsn("0/2".into()));
-        assert_eq!(Lsn("0/1".into()), Lsn("0/1".into()));
+        assert!(json.contains("binlog_file"));
+        assert!(json.contains("binlog_offset"));
     }
 
     #[test]
@@ -360,11 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn test_lsn_serde_roundtrip() {
-        let lsn = Lsn("0/ABCDEF".into());
-        let json = serde_json::to_string(&lsn).unwrap();
-        assert_eq!(json, r#""0/ABCDEF""#);
-        let back: Lsn = serde_json::from_str(&json).unwrap();
-        assert_eq!(lsn, back);
+    fn test_lsn_is_option_string() {
+        // Verify lsn field works as Option<String>
+        let source = SourceMetadata {
+            lsn: Some("0/ABCDEF".into()),
+            ..Default::default()
+        };
+        assert_eq!(source.lsn.as_deref(), Some("0/ABCDEF"));
+
+        let source_no_lsn = SourceMetadata::default();
+        assert_eq!(source_no_lsn.lsn, None);
     }
 }

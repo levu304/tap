@@ -706,7 +706,9 @@ pub(crate) fn emit_row_event(
         db: db_name.to_string(),
         schema: table.schema.clone(),
         table: table.name.clone(),
-        lsn: crate::event::Lsn(snapshot_lsn.to_string()),
+        lsn: Some(snapshot_lsn.to_string()),
+        binlog_file: None,
+        binlog_offset: None,
         tx_id: "0".into(),
         ts_ms,
         snapshot: Some(true),
@@ -768,7 +770,6 @@ pub(crate) fn estimate_row_size(value: &serde_json::Value) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::Lsn as EventLsn;
     use serde_json::json;
 
     // ── parse_qualified_name ────────────────────────────────────────
@@ -947,7 +948,9 @@ mod tests {
             db: "test_db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: EventLsn("0/16B37428".into()),
+            lsn: Some("0/16B37428".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "0".into(),
             ts_ms: 1_700_000_000_000,
             snapshot: Some(true),
@@ -980,7 +983,9 @@ mod tests {
             db: "snap_db".into(),
             schema: "public".into(),
             table: "orders".into(),
-            lsn: EventLsn("0/ABCD".into()),
+            lsn: Some("0/ABCD".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "0".into(),
             ts_ms: 1_700_000_000_000,
             snapshot: Some(true),

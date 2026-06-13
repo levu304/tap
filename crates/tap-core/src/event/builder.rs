@@ -57,7 +57,9 @@ impl ChangeEventBuilder {
 ///     db: "mydb".into(),
 ///     schema: "public".into(),
 ///     table: "users".into(),
-///     lsn: "0/1234567".parse().unwrap(),
+///     lsn: Some("0/1234567".into()),
+///     binlog_file: None,
+///     binlog_offset: None,
 ///     tx_id: "42".into(),
 ///     ts_ms: 1_700_000_000_000,
 ///     snapshot: None,
@@ -156,8 +158,8 @@ impl ChangeEventBuilder {
                 format!("snap:{}.{}:{}", source.schema, source.table, short)
             }
             _ => {
-                if !source.lsn.is_empty() {
-                    format!("{}:{}", source.lsn, source.tx_id)
+                if let Some(ref lsn) = source.lsn {
+                    format!("{}:{}", lsn, source.tx_id)
                 } else {
                     Uuid::new_v4().to_string()
                 }
@@ -174,7 +176,6 @@ impl Default for ChangeEventBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::envelope::Lsn;
     use super::*;
 
     #[test]
@@ -183,7 +184,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/1".into()),
+            lsn: Some("0/1".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "1".into(),
             ts_ms: 100,
             snapshot: None,
@@ -211,7 +214,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn::default(),
+            lsn: None,
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -227,7 +232,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn("0/ABCDEF".into()),
+            lsn: Some("0/ABCDEF".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "123".into(),
             ts_ms: 0,
             snapshot: None,
@@ -248,7 +255,9 @@ mod tests {
             db: "db".into(),
             schema: "public".into(),
             table: "users".into(),
-            lsn: Lsn("0/0".into()),
+            lsn: Some("0/0".into()),
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: "0".into(),
             ts_ms: 0,
             snapshot: Some(true),
@@ -269,7 +278,9 @@ mod tests {
             db: "db".into(),
             schema: "s".into(),
             table: "t".into(),
-            lsn: Lsn::default(),
+            lsn: None,
+            binlog_file: None,
+            binlog_offset: None,
             tx_id: String::new(),
             ts_ms: 0,
             snapshot: None,

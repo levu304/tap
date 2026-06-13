@@ -90,7 +90,9 @@ impl From<MySqlChangeEvent> for ChangeEvent {
                 db: e.source.db,
                 schema: String::new(), // MySQL has no schema layer
                 table: e.source.table,
-                lsn: String::new().parse().unwrap(),
+                lsn: None,
+                binlog_file: Some(e.source.binlog_file.clone()),
+                binlog_offset: Some(e.source.binlog_offset),
                 tx_id: e.source.tx_id,
                 ts_ms: e.source.ts_ms,
                 snapshot: e.source.snapshot,
@@ -747,7 +749,9 @@ fn build_change_event(
             db: source.db.clone(),
             schema: String::new(),
             table: source.table.clone(),
-            lsn: String::new().parse().unwrap(),
+            lsn: None,
+            binlog_file: Some(source.binlog_file.clone()),
+            binlog_offset: Some(source.binlog_offset),
             tx_id: source.tx_id.clone(),
             ts_ms: source.ts_ms,
             snapshot: source.snapshot,
@@ -935,7 +939,7 @@ mod tests {
         // Constructing a real binlog Event requires raw bytes from an
         // actual binlog dump.  This test verifies the function compiles
         // and that the cache-based API is consistent.
-        let mut cache = TableMapCache::new();
+        let cache = TableMapCache::new();
         assert!(cache.is_empty());
 
         // Verify the cache can hold values (simulating an insert).
@@ -1107,8 +1111,8 @@ mod tests {
         );
         assert_eq!(events[0].source.db, "test");
         assert_eq!(events[0].source.table, "users");
-        // MySQL events have an empty LSN (Postgres concept, not applicable)
-        assert_eq!(events[0].source.lsn.to_string(), "");
+        // MySQL events have no Postgres LSN
+        assert_eq!(events[0].source.lsn, None);
     }
 
     #[test]
