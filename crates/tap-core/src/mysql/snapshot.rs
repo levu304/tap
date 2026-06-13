@@ -31,10 +31,8 @@ use tracing::{error, info, warn};
 
 use crate::config::{MySqlSourceConfig, SnapshotConfig};
 use crate::error::TapError;
-use crate::event::{
-    builder::ChangeEventBuilder, ChangeEvent, Lsn, Operation, SourceMetadata,
-};
-use crate::snapshot::chunker::{generate_chunks, PkRange, SnapshotChunk};
+use crate::event::{ChangeEvent, Lsn, Operation, SourceMetadata, builder::ChangeEventBuilder};
+use crate::snapshot::chunker::{PkRange, SnapshotChunk, generate_chunks};
 use crate::snapshot::runner::TableInfo;
 
 // ---------------------------------------------------------------------------
@@ -117,12 +115,21 @@ pub async fn run_mysql_parallel_snapshot(
             table.qualified,
         );
 
-        let mut result = meta_conn.query_iter(range_sql.as_str()).await.map_err(|e| {
-            TapError::Snapshot(format!("PK range query failed for {}: {e}", table.qualified))
-        })?;
+        let mut result = meta_conn
+            .query_iter(range_sql.as_str())
+            .await
+            .map_err(|e| {
+                TapError::Snapshot(format!(
+                    "PK range query failed for {}: {e}",
+                    table.qualified
+                ))
+            })?;
 
         let rows: Vec<MyRow> = result.collect().await.map_err(|e| {
-            TapError::Snapshot(format!("PK range collect failed for {}: {e}", table.qualified))
+            TapError::Snapshot(format!(
+                "PK range collect failed for {}: {e}",
+                table.qualified
+            ))
         })?;
 
         let pk_range = rows.into_iter().next().and_then(|r| {
@@ -136,7 +143,14 @@ pub async fn run_mysql_parallel_snapshot(
             }
         });
 
-        let chunks = generate_chunks(table, &snapshot_id, pk_col, pk_range.as_ref(), num_chunks, &[]);
+        let chunks = generate_chunks(
+            table,
+            &snapshot_id,
+            pk_col,
+            pk_range.as_ref(),
+            num_chunks,
+            &[],
+        );
 
         table_work_list.push(TableWork {
             table: table.clone(),
@@ -217,16 +231,8 @@ pub async fn run_mysql_parallel_snapshot(
 
         let handle: tokio::task::JoinHandle<Result<(u64, u64), TapError>> =
             tokio::spawn(async move {
-                    mysql_worker_main(
-                    pool,
-                    &table,
-                    &pks,
-                    assignment.rx,
-                    event_tx,
-                    lsn,
-                    batch_size,
-                )
-                .await
+                mysql_worker_main(pool, &table, &pks, assignment.rx, event_tx, lsn, batch_size)
+                    .await
             });
         handles.push((wi, handle));
     }
@@ -390,9 +396,7 @@ async fn mysql_detect_pk_columns(
             (&table.schema, &table.name),
         )
         .await
-        .map_err(|e| {
-            TapError::Snapshot(format!("PK query failed for {}: {e}", table.qualified))
-        })?
+        .map_err(|e| TapError::Snapshot(format!("PK query failed for {}: {e}", table.qualified)))?
         .collect()
         .await
         .map_err(|e| {
@@ -431,16 +435,8 @@ async fn mysql_worker_main(
     let mut chunks_processed: u64 = 0;
 
     while let Some(chunk) = chunk_rx.recv().await {
-        let rows = mysql_scan_chunk(
-            &mut conn,
-            table,
-            pks,
-            &chunk,
-            &event_tx,
-            &lsn,
-            batch_size,
-        )
-        .await?;
+        let rows =
+            mysql_scan_chunk(&mut conn, table, pks, &chunk, &event_tx, &lsn, batch_size).await?;
         total_rows += rows;
         chunks_processed += 1;
     }
@@ -566,9 +562,9 @@ fn emit_mysql_row_event(
         .build()
         .map_err(|e| TapError::Snapshot(format!("build ChangeEvent failed: {e}")))?;
 
-    event_tx.send(event).map_err(|e| {
-        TapError::Snapshot(format!("send ChangeEvent failed: {e}"))
-    })?;
+    event_tx
+        .send(event)
+        .map_err(|e| TapError::Snapshot(format!("send ChangeEvent failed: {e}")))?;
 
     Ok(())
 }
@@ -633,7 +629,10 @@ fn mysql_value_to_json_value(val: &MyValue) -> serde_json::Value {
             Ok(s) => serde_json::Value::String(s.to_string()),
             Err(_) => serde_json::Value::String(format!(
                 "0x{}",
-                b.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat()
+                b.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .concat()
             )),
         },
         MyValue::Date(y, mo, d, h, mi, s, us) => {
@@ -778,39 +777,22 @@ mod tests {
 
     #[test]
     fn where_clause_only_start() {
-        let chunk = SnapshotChunk::new(
-            "test.t".into(),
-            "snap1".into(),
-            0,
-            Some("100".into()),
-            None,
-        );
+        let chunk =
+            SnapshotChunk::new("test.t".into(), "snap1".into(), 0, Some("100".into()), None);
         let sql = mysql_where_clause(&["id".into()], &chunk);
         assert_eq!(sql, "`id` >= 100");
     }
 
     #[test]
     fn where_clause_only_end() {
-        let chunk = SnapshotChunk::new(
-            "test.t".into(),
-            "snap1".into(),
-            0,
-            None,
-            Some("50".into()),
-        );
+        let chunk = SnapshotChunk::new("test.t".into(), "snap1".into(), 0, None, Some("50".into()));
         let sql = mysql_where_clause(&["id".into()], &chunk);
         assert_eq!(sql, "`id` < 50");
     }
 
     #[test]
     fn where_clause_unbounded() {
-        let chunk = SnapshotChunk::new(
-            "test.t".into(),
-            "snap1".into(),
-            0,
-            None,
-            None,
-        );
+        let chunk = SnapshotChunk::new("test.t".into(), "snap1".into(), 0, None, None);
         let sql = mysql_where_clause(&["id".into()], &chunk);
         assert_eq!(sql, "TRUE");
     }
@@ -855,18 +837,30 @@ mod tests {
 
     #[test]
     fn value_to_json_null() {
-        assert_eq!(mysql_value_to_json_value(&MyValue::NULL), serde_json::Value::Null);
+        assert_eq!(
+            mysql_value_to_json_value(&MyValue::NULL),
+            serde_json::Value::Null
+        );
     }
 
     #[test]
     fn value_to_json_int() {
-        assert_eq!(mysql_value_to_json_value(&MyValue::Int(42)), serde_json::json!(42));
-        assert_eq!(mysql_value_to_json_value(&MyValue::Int(-1)), serde_json::json!(-1));
+        assert_eq!(
+            mysql_value_to_json_value(&MyValue::Int(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            mysql_value_to_json_value(&MyValue::Int(-1)),
+            serde_json::json!(-1)
+        );
     }
 
     #[test]
     fn value_to_json_uint() {
-        assert_eq!(mysql_value_to_json_value(&MyValue::UInt(999)), serde_json::json!(999));
+        assert_eq!(
+            mysql_value_to_json_value(&MyValue::UInt(999)),
+            serde_json::json!(999)
+        );
     }
 
     #[test]
