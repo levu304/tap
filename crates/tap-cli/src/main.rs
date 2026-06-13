@@ -179,6 +179,7 @@ fn exit_code_for_error(err: &TapError) -> u8 {
         TapError::Io(_) => 4,
         TapError::Decode(_) | TapError::Snapshot(_) => 5,
         TapError::Sqlite(_) | TapError::StateCorruption(_) => 7,
+        TapError::Transform(_) => 8,
     }
 }
 
