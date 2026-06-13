@@ -22,6 +22,7 @@
 
 pub mod connection;
 pub mod events;
+pub mod schema;
 pub mod snapshot;
 pub mod types;
 

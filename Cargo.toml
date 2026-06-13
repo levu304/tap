@@ -69,6 +69,9 @@ mysql_async = { version = "0.37", features = ["binlog", "chrono"] }
 tonic = "0.12"
 prost = "0.13"
 
+# DDL detection for schema cache
+regex = "1"
+
 [profile.release]
 lto = "fat"
 strip = true
