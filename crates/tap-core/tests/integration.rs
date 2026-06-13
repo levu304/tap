@@ -27,6 +27,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tap_core::config::{SnapshotConfig, SourceConfig, StateConfig};
 use tap_core::postgres::{self, Lsn, PgConnection};
 use tap_core::snapshot::SnapshotRunner;
+use tap_core::snapshot::parallel::run_parallel_snapshot;
 use tap_core::state::StateStore;
 
 /// Postgres image to use for all integration tests.
@@ -956,6 +957,139 @@ async fn test_snapshot_runner_captures_existing_rows() {
     // Await background tasks
     let _ = keeper_handle.await;
     let _ = worker_handle.await;
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Parallel snapshot integration (requires Postgres)
+// ---------------------------------------------------------------------------
+
+/// Test that the parallel snapshot runner correctly snapshots pre-existing
+/// rows using 4 concurrent workers and emits Read events with snapshot=true.
+#[tokio::test]
+async fn test_parallel_snapshot_captures_rows_with_4_workers() {
+    let _pg = pg_lock().await;
+    let pg = get_test_pg();
+    let table = test_name("t_par_snap");
+    let slot = test_name("slot_par_snap");
+
+    pg.create_test_table(&table).await;
+
+    // Pre-populate 12 rows for balanced chunk distribution
+    pg.insert_rows(
+        &table,
+        &[
+            ("alpha", 100),
+            ("bravo", 200),
+            ("charlie", 300),
+            ("delta", 400),
+            ("echo", 500),
+            ("foxtrot", 600),
+            ("golf", 700),
+            ("hotel", 800),
+            ("india", 900),
+            ("juliet", 1000),
+            ("kilo", 1100),
+            ("lima", 1200),
+        ],
+    )
+    .await;
+
+    // Build a SourceConfig from the test PG connection string
+    let conn_str = pg.connection_string();
+    let source_cfg = source_config_from_conn_str(conn_str, &slot, &table);
+
+    // Only the keeper connection is needed — workers open their own
+    let (keeper, keeper_handle) = postgres::connect_plain(&source_cfg)
+        .await
+        .expect("keeper connect");
+
+    // Open a temp state store for chunk progress tracking
+    let dir = std::env::temp_dir().join(format!("tap_par_snap_{}", test_name("")));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("state.db");
+    let state_config = StateConfig {
+        path: db_path.to_string_lossy().to_string(),
+        max_backup_size_kb: 1024,
+    };
+    let state = Arc::new(tokio::sync::Mutex::new(
+        StateStore::open(&state_config).expect("open state store"),
+    ));
+
+    let tables = vec![format!("public.{table}")];
+    let snap_config = SnapshotConfig {
+        tables,
+        num_workers: 4,
+        batch_size: 100, // small batch for chunk-level test coverage
+        ..Default::default()
+    };
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tap_core::event::ChangeEvent>();
+
+    let result = run_parallel_snapshot(
+        keeper,
+        &source_cfg,
+        state.clone(),
+        &snap_config,
+        psql_db_name(pg.connection_string()),
+        event_tx,
+    )
+    .await
+    .expect("parallel snapshot should succeed");
+
+    // Verify snapshot result
+    assert_eq!(result.total_rows, 12, "should have snapshotted 12 rows");
+    assert!(
+        !result.tables_snapshotted.is_empty(),
+        "should have at least one table"
+    );
+    assert!(!result.snapshot_id.is_empty(), "should have a snapshot ID");
+
+    // Collect events
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+
+    assert_eq!(events.len(), 12, "should have 12 Read events");
+
+    // Verify each event is a Read operation with snapshot=true
+    for event in &events {
+        assert_eq!(
+            event.op,
+            tap_core::event::Operation::Read,
+            "parallel snapshot events should be Read operations"
+        );
+        assert!(
+            event.source.snapshot == Some(true),
+            "parallel snapshot events should have snapshot=true"
+        );
+    }
+
+    // Verify field order matches insertion order (by primary key)
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| {
+            e.after
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima"
+        ],
+        "events should be in PK order"
+    );
+
+    // Await keeper handle (keeper Client is dropped inside run_parallel_snapshot)
+    let _ = keeper_handle.await;
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&dir);

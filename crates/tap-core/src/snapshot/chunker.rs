@@ -30,7 +30,7 @@ use tracing::warn;
 
 use crate::error::TapError;
 
-use super::runner::{quote_ident, qualified_sql, TableInfo};
+use super::runner::{TableInfo, qualified_sql, quote_ident};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -354,7 +354,10 @@ mod tests {
     fn test_classify_composite_pk() {
         let pks = vec!["org_id".to_string(), "user_id".to_string()];
         let (kind, cols) = classify_pk(&pks);
-        assert_eq!(kind, PkKind::Composite(vec!["org_id".into(), "user_id".into()]));
+        assert_eq!(
+            kind,
+            PkKind::Composite(vec!["org_id".into(), "user_id".into()])
+        );
         assert_eq!(cols.len(), 2);
     }
 
@@ -445,8 +448,18 @@ mod tests {
 
         // chunk 0 and 2 already completed
         let existing = vec![
-            (0u32, Some("1".into()), Some("26".into()), "completed".into()),
-            (2u32, Some("51".into()), Some("76".into()), "completed".into()),
+            (
+                0u32,
+                Some("1".into()),
+                Some("26".into()),
+                "completed".into(),
+            ),
+            (
+                2u32,
+                Some("51".into()),
+                Some("76".into()),
+                "completed".into(),
+            ),
         ];
 
         let chunks = generate_chunks(&table, "snap_4", "id", Some(&range), 4, &existing);
@@ -477,13 +490,7 @@ mod tests {
 
     #[test]
     fn test_where_clause_no_bounds() {
-        let chunk = SnapshotChunk::new(
-            "public.empty".into(),
-            "snap_2".into(),
-            0,
-            None,
-            None,
-        );
+        let chunk = SnapshotChunk::new("public.empty".into(), "snap_2".into(), 0, None, None);
         let (clause, start, end) = chunk.where_clause("id");
         assert!(clause.is_empty());
         assert_eq!(start, None);

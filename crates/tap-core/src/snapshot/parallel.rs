@@ -26,20 +26,20 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use tracing::{error, info, warn};
 
-use crate::config::SourceConfig;
+use crate::config::{SnapshotConfig, SourceConfig};
 use crate::error::TapError;
 use crate::event::ChangeEvent;
-use crate::postgres::{connect_plain, Lsn};
+use crate::postgres::{Lsn, connect_plain};
 use crate::state::StateStore;
 
-use super::chunker::{generate_chunks, query_pk_range, SnapshotChunk};
+use super::chunker::{SnapshotChunk, generate_chunks, query_pk_range};
 use super::runner::{
-    detect_pk_columns, emit_row_event, parse_qualified_name, qualified_sql, quote_ident,
-    SnapshotResult, TableInfo,
+    SnapshotResult, TableInfo, detect_pk_columns, emit_row_event, parse_qualified_name,
+    qualified_sql, quote_ident,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,8 +55,7 @@ use super::runner::{
 /// * `source_config` — Postgres source config (used to spawn worker
 ///   connections and resolve publication tables).
 /// * `state` — Shared state store for checkpointing chunk progress.
-/// * `num_workers` — Number of concurrent worker tasks.
-/// * `batch_size` — Rows fetched per cursor FETCH call.
+/// * `config` — Snapshot configuration (batch_size, num_workers, tables).
 /// * `db_name` — Database name (for source metadata in events).
 /// * `event_tx` — Channel for emitting `ChangeEvent`s.
 ///
@@ -72,15 +71,14 @@ use super::runner::{
 /// use tap_core::snapshot::parallel::run_parallel_snapshot;
 ///
 /// let result = run_parallel_snapshot(
-///     keeper, &source_config, state, num_workers, batch_size, "mydb", event_tx
+///     keeper, &source_config, state, &snap_config, "mydb", event_tx
 /// ).await?;
 /// ```
 pub async fn run_parallel_snapshot(
     keeper: tokio_postgres::Client,
     source_config: &SourceConfig,
     state: Arc<Mutex<StateStore>>,
-    num_workers: u32,
-    batch_size: u32,
+    config: &SnapshotConfig,
     db_name: String,
     event_tx: UnboundedSender<ChangeEvent>,
 ) -> Result<SnapshotResult, TapError> {
@@ -101,8 +99,8 @@ pub async fn run_parallel_snapshot(
                 &state,
                 &snapshot_id,
                 lsn,
-                num_workers,
-                batch_size,
+                config.num_workers,
+                config.batch_size as u32,
                 &db_name,
                 &event_tx,
             )
@@ -231,9 +229,10 @@ async fn run_snapshot_inner(
     let work_rx = Arc::new(Mutex::new(work_rx));
 
     for chunk in all_chunks {
-        work_tx.send(chunk).await.map_err(|_| {
-            TapError::Snapshot("failed to enqueue chunk into work queue".into())
-        })?;
+        work_tx
+            .send(chunk)
+            .await
+            .map_err(|_| TapError::Snapshot("failed to enqueue chunk into work queue".into()))?;
     }
     // Drop the sender so receivers see None when all chunks are consumed
     drop(work_tx);
@@ -324,12 +323,8 @@ async fn run_snapshot_inner(
 // ---------------------------------------------------------------------------
 
 /// Export a Postgres snapshot and capture the WAL position.
-async fn export_snapshot_inner(
-    keeper: &tokio_postgres::Client,
-) -> Result<(String, Lsn), TapError> {
-    let snap_row = keeper
-        .query_one("SELECT pg_export_snapshot()", &[])
-        .await?;
+async fn export_snapshot_inner(keeper: &tokio_postgres::Client) -> Result<(String, Lsn), TapError> {
+    let snap_row = keeper.query_one("SELECT pg_export_snapshot()", &[]).await?;
     let snapshot_id: String = snap_row.get(0);
 
     let lsn_row = keeper
@@ -361,7 +356,10 @@ async fn resolve_tables_inner(
     }
 
     let pub_name = keeper
-        .query_one("SELECT COALESCE(pubname, 'tap_publication') FROM pg_publication LIMIT 1", &[])
+        .query_one(
+            "SELECT COALESCE(pubname, 'tap_publication') FROM pg_publication LIMIT 1",
+            &[],
+        )
         .await
         .map(|r| {
             let s: String = r.get(0);
@@ -530,7 +528,12 @@ async fn worker_loop(
                 // Mark chunk completed
                 {
                     let store = state.lock().await;
-                    store.complete_chunk(snapshot_id, &chunk.table_name, chunk.chunk_index, rows_count)?;
+                    store.complete_chunk(
+                        snapshot_id,
+                        &chunk.table_name,
+                        chunk.chunk_index,
+                        rows_count,
+                    )?;
                 }
                 info!(
                     worker_id,
@@ -551,7 +554,12 @@ async fn worker_loop(
                 // Record failure and set error flag
                 {
                     let store = state.lock().await;
-                    store.fail_chunk(snapshot_id, &chunk.table_name, chunk.chunk_index, &e.to_string())?;
+                    store.fail_chunk(
+                        snapshot_id,
+                        &chunk.table_name,
+                        chunk.chunk_index,
+                        &e.to_string(),
+                    )?;
                 }
                 error_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 return Err(e);
@@ -606,9 +614,7 @@ async fn scan_chunk(
         String::new()
     };
 
-    let query = format!(
-        "SELECT * FROM {sql_table} {where_clause} ORDER BY {order_clause}, ctid"
-    );
+    let query = format!("SELECT * FROM {sql_table} {where_clause} ORDER BY {order_clause}, ctid");
 
     // Declare cursor
     client
@@ -691,13 +697,7 @@ mod tests {
 
     #[test]
     fn test_chunk_where_no_bounds() {
-        let chunk = SnapshotChunk::new(
-            "public.empty".into(),
-            "snap_2".into(),
-            0,
-            None,
-            None,
-        );
+        let chunk = SnapshotChunk::new("public.empty".into(), "snap_2".into(), 0, None, None);
         let (clause, _, _) = chunk.where_clause("id");
         assert_eq!(clause, "");
     }
@@ -726,9 +726,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let query = format!(
-            "SELECT * FROM {sql_table} WHERE {clause} ORDER BY {order_clause}, ctid"
-        );
+        let query =
+            format!("SELECT * FROM {sql_table} WHERE {clause} ORDER BY {order_clause}, ctid");
 
         assert!(query.contains("SELECT * FROM \"public\".\"users\""));
         assert!(query.contains(r#""id" >= 1"#), "query={query}");

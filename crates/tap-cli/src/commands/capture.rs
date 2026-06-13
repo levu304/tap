@@ -16,6 +16,7 @@ use tap_core::event::ChangeEvent;
 use tap_core::postgres::create_decoder;
 use tap_core::postgres::{Lsn, PgConnection, connect_plain};
 use tap_core::snapshot::SnapshotRunner;
+use tap_core::snapshot::parallel::run_parallel_snapshot;
 use tap_core::sse::{SseEvent, SseEventType, SseServer};
 use tap_core::state::StateStore;
 use tokio::signal::unix::{SignalKind, signal};
@@ -167,26 +168,45 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
             ))
             .ok();
 
-        // Create plain connections for snapshot
-        let (keeper, keeper_handle) = connect_plain(&config.source).await?;
-        let (worker, worker_handle) = connect_plain(&config.source).await?;
+        // Determine runner: parallel (num_workers > 1) or sequential
+        let snapshot_result = if config.snapshot.num_workers > 1 {
+            let (keeper, keeper_handle) = connect_plain(&config.source).await?;
 
-        let mut snapshot_runner = SnapshotRunner::new(
-            keeper,
-            worker,
-            state.clone(),
-            config.snapshot.clone(),
-            config.source.dbname.clone(),
-            change_tx.clone(),
-        );
+            let result = run_parallel_snapshot(
+                keeper,
+                &config.source,
+                state.clone(),
+                &config.snapshot,
+                config.source.dbname.clone(),
+                change_tx.clone(),
+            )
+            .await;
 
-        let snapshot_result = snapshot_runner.run().await;
-        // Drop runner to release Clients before awaiting handles, preventing
-        // a tokio self-deadlock (handles resolve only after Client is dropped).
-        drop(snapshot_runner);
-        let _ = keeper_handle.await;
-        let _ = worker_handle.await;
-        let snapshot_result = snapshot_result?;
+            // Drop keeper (already released inside run_parallel_snapshot, but
+            // await the handle to complete the tokio driver lifecycle).
+            let _ = keeper_handle.await;
+            result?
+        } else {
+            let (keeper, keeper_handle) = connect_plain(&config.source).await?;
+            let (worker, worker_handle) = connect_plain(&config.source).await?;
+
+            let mut snapshot_runner = SnapshotRunner::new(
+                keeper,
+                worker,
+                state.clone(),
+                config.snapshot.clone(),
+                config.source.dbname.clone(),
+                change_tx.clone(),
+            );
+
+            let result = snapshot_runner.run().await;
+            // Drop runner to release Clients before awaiting handles, preventing
+            // a tokio self-deadlock (handles resolve only after Client is dropped).
+            drop(snapshot_runner);
+            let _ = keeper_handle.await;
+            let _ = worker_handle.await;
+            result?
+        };
 
         // Update start_lsn so replication resumes from snapshot position
         start_lsn = Some(snapshot_result.lsn);
