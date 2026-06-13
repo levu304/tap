@@ -252,6 +252,11 @@ async fn run_snapshot_inner(
             }
         }
 
+        // ── 3a. Detect chunk-size skew (pre-flight) ─────────────
+        if chunks.len() > 1 && !pk_str.is_empty() {
+            detect_chunk_skew(keeper, table, &pk_str, &chunks).await?;
+        }
+
         all_chunks.extend(chunks);
         tables_snapshotted.push(format!("\"{}\".\"{}\"", table.schema, table.name));
     }
@@ -454,6 +459,71 @@ async fn resolve_tables_inner(
         .collect();
 
     Ok(tables)
+}
+
+// ---------------------------------------------------------------------------
+// Chunk skew detection (pre-flight)
+// ---------------------------------------------------------------------------
+
+/// Warn if chunk sizes are highly skewed (stddev > 2× mean).
+///
+/// Skew indicates the PK distribution is non-uniform, which commonly
+/// happens with time-ordered UUIDs (`gen_random_uuid()` v1/v4) or
+/// clustered integer keys.  In extreme cases a single worker ends up
+/// scanning most of the rows while others sit idle.
+async fn detect_chunk_skew(
+    keeper: &tokio_postgres::Client,
+    table: &TableInfo,
+    pk_column: &str,
+    chunks: &[SnapshotChunk],
+) -> Result<(), TapError> {
+    let sql_table = qualified_sql(table);
+    let mut sizes = Vec::with_capacity(chunks.len());
+
+    for chunk in chunks {
+        let (clause, _, _) = chunk.where_clause(pk_column);
+        let query = format!("SELECT COUNT(*) FROM {sql_table} {clause}");
+        let row = keeper.query_one(&query, &[]).await.map_err(|e| {
+            TapError::Snapshot(format!(
+                "skew count query failed for {}: {e}",
+                table.qualified
+            ))
+        })?;
+        let count: i64 = row.get(0);
+        sizes.push(count);
+    }
+
+    let n = sizes.len() as f64;
+    if n <= 1.0 {
+        return Ok(());
+    }
+
+    let total: i64 = sizes.iter().sum();
+    let mean = total as f64 / n;
+
+    if mean <= 0.0 {
+        return Ok(());
+    }
+
+    // Population standard deviation
+    let variance = sizes
+        .iter()
+        .map(|s| (*s as f64 - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    let stddev = variance.sqrt();
+
+    if stddev > 2.0 * mean {
+        warn!(
+            table = %table.qualified,
+            chunks = chunks.len(),
+            stddev = %format!("{:.1}", stddev),
+            mean = %format!("{:.0}", mean),
+            "chunk size skew detected — stddev > 2× mean; PK may be non-monotonic"
+        );
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
