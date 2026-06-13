@@ -13,3 +13,4 @@
 //! * [`validate`] — Post-transform envelope validation.
 
 pub mod config;
+pub mod engine;

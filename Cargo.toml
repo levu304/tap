@@ -72,6 +72,9 @@ prost = "0.13"
 # DDL detection for schema cache
 regex = "1"
 
+# WASM runtime for transform engine
+wasmtime = "24"
+
 [profile.release]
 lto = "fat"
 strip = true
