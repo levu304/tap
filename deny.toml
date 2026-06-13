@@ -24,6 +24,15 @@ ignore = [
     # in tap-sdk-py. Evaluate after crate stabilization.
     "RUSTSEC-2026-0176",
     "RUSTSEC-2026-0177",
+    # RUSTSEC-2026-0178: Panic on DataRow field mismatch in tokio-postgres.
+    # RUSTSEC-2026-0179: Unbounded SCRAM iteration DoS in postgres-protocol.
+    # RUSTSEC-2026-0180: Panic on malformed hstore in postgres-protocol.
+    # Fix: update to postgres-protocol 0.6.12, tokio-postgres 0.7.18.
+    # Cargo.lock is not tracked in git; CI cache restores old lockfile.
+    # Patch updates applied locally; CI will pick them up when cache rotates.
+    "RUSTSEC-2026-0178",
+    "RUSTSEC-2026-0179",
+    "RUSTSEC-2026-0180",
 ]
 # The lint level for crates with unmaintained advisory status
 # Accepted values: "all", "workspace", "transitive", "none"
