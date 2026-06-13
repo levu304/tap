@@ -9,11 +9,11 @@
 //! ```toml
 //! failClosed = false
 //!
-//! [[transforms]]
+//! [[pipeline]]
 //! type = "filter"
 //! script = "function f(e) { return e.op !== 'd'; }"
 //!
-//! [[transforms]]
+//! [[pipeline]]
 //! type = "map"
 //! script = """
 //!   function m(e) {
@@ -22,7 +22,7 @@
 //!   }
 //! """
 //!
-//! [[transforms]]
+//! [[pipeline]]
 //! type = "mask"
 //! fields = ["email", "phone"]
 //! strategy = "hash"
@@ -46,7 +46,7 @@ use crate::event::ChangeEvent;
 pub struct TransformConfig {
     /// Ordered list of transform descriptors to apply to every event.
     #[serde(default)]
-    pub transforms: Vec<TransformDescriptor>,
+    pub pipeline: Vec<TransformDescriptor>,
 
     /// Behaviour when a transform produces an error:
     ///
@@ -73,6 +73,7 @@ pub struct TransformConfig {
 /// | `Mask`   | Replaces designated field values using the chosen [`MaskStrategy`] (no JS needed). |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TransformDescriptor {
     /// A JavaScript filter: `function(event): boolean`.
     ///
@@ -122,6 +123,7 @@ pub enum TransformDescriptor {
 /// | `Null`   | `"null"`   | Replace the value with JSON `null`. |
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MaskStrategy {
     /// Replace with the literal string `***REDACTED***`.
     #[default]
@@ -140,6 +142,7 @@ pub enum MaskStrategy {
 ///
 /// This enum lets the engine decide how to route the event after each step.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransformResult {
     /// The event passed through this transform unchanged (filter returned
     /// `true`, or no matching fields for a mask).
@@ -174,14 +177,14 @@ mod tests {
     #[test]
     fn test_transform_config_default() {
         let cfg = TransformConfig::default();
-        assert!(cfg.transforms.is_empty());
+        assert!(cfg.pipeline.is_empty());
         assert!(!cfg.fail_closed);
     }
 
     #[test]
     fn test_transform_config_empty_pipeline() {
         let cfg: TransformConfig = toml::from_str("").expect("empty transforms");
-        assert!(cfg.transforms.is_empty());
+        assert!(cfg.pipeline.is_empty());
         assert!(!cfg.fail_closed);
     }
 
@@ -199,14 +202,14 @@ mod tests {
     #[test]
     fn test_transform_descriptor_filter() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "filter"
         script = "function f(e) { return e.op !== 'd'; }"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("filter descriptor");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Filter { script } => {
                 assert!(script.contains("function f"));
             }
@@ -221,14 +224,14 @@ mod tests {
     #[test]
     fn test_transform_descriptor_map() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "map"
         script = "function m(e) { e.after.name = 'test'; return e; }"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("map descriptor");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Map { script } => {
                 assert!(script.contains("function m"));
             }
@@ -243,14 +246,14 @@ mod tests {
     #[test]
     fn test_transform_descriptor_mask_default_strategy() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         fields = ["email"]
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("mask default");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Mask { fields, strategy } => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0], "email");
@@ -263,15 +266,15 @@ mod tests {
     #[test]
     fn test_transform_descriptor_mask_hash_strategy() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         fields = ["email", "phone"]
         strategy = "hash"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("mask hash");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Mask { fields, strategy } => {
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0], "email");
@@ -285,15 +288,15 @@ mod tests {
     #[test]
     fn test_transform_descriptor_mask_null_strategy() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         fields = ["ssn"]
         strategy = "null"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("mask null");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Mask { fields, strategy } => {
                 assert_eq!(fields[0], "ssn");
                 assert_eq!(*strategy, MaskStrategy::Null);
@@ -305,15 +308,15 @@ mod tests {
     #[test]
     fn test_transform_descriptor_mask_redact_strategy() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         fields = ["secret"]
         strategy = "redact"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("mask redact");
-        assert_eq!(cfg.transforms.len(), 1);
+        assert_eq!(cfg.pipeline.len(), 1);
 
-        match &cfg.transforms[0] {
+        match &cfg.pipeline[0] {
             TransformDescriptor::Mask { fields, strategy } => {
                 assert_eq!(fields[0], "secret");
                 assert_eq!(*strategy, MaskStrategy::Redact);
@@ -331,32 +334,76 @@ mod tests {
         let toml_str = r#"
         failClosed = true
 
-        [[transforms]]
+        [[pipeline]]
         type = "filter"
         script = "function f(e) { return e.op !== 'd'; }"
 
-        [[transforms]]
+        [[pipeline]]
         type = "map"
         script = "function m(e) { e.after.ts = Date.now(); return e; }"
 
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         fields = ["email"]
         strategy = "hash"
         "#;
         let cfg: TransformConfig = toml::from_str(toml_str).expect("full pipeline");
         assert!(cfg.fail_closed);
-        assert_eq!(cfg.transforms.len(), 3);
+        assert_eq!(cfg.pipeline.len(), 3);
 
         assert!(matches!(
-            cfg.transforms[0],
+            cfg.pipeline[0],
             TransformDescriptor::Filter { .. }
         ));
-        assert!(matches!(cfg.transforms[1], TransformDescriptor::Map { .. }));
-        assert!(matches!(
-            cfg.transforms[2],
-            TransformDescriptor::Mask { .. }
-        ));
+        assert!(matches!(cfg.pipeline[1], TransformDescriptor::Map { .. }));
+        assert!(matches!(cfg.pipeline[2], TransformDescriptor::Mask { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transform_config_toml_roundtrip() {
+        let cfg = TransformConfig {
+            fail_closed: true,
+            pipeline: vec![
+                TransformDescriptor::Filter {
+                    script: "function f(e) { return true; }".into(),
+                },
+                TransformDescriptor::Mask {
+                    fields: vec!["email".into()],
+                    strategy: MaskStrategy::Redact,
+                },
+            ],
+        };
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let deserialized: TransformConfig =
+            toml::from_str(&toml_str).expect("deserialize roundtrip");
+        assert_eq!(cfg.fail_closed, deserialized.fail_closed);
+        assert_eq!(cfg.pipeline.len(), deserialized.pipeline.len());
+        assert_eq!(
+            format!("{:?}", cfg.pipeline[0]),
+            format!("{:?}", deserialized.pipeline[0])
+        );
+    }
+
+    #[test]
+    fn test_transform_descriptor_mask_empty_fields() {
+        let toml_str = r#"
+        [[pipeline]]
+        type = "mask"
+        fields = []
+        strategy = "redact"
+        "#;
+        let cfg: TransformConfig = toml::from_str(toml_str).expect("empty fields mask");
+        match &cfg.pipeline[0] {
+            TransformDescriptor::Mask { fields, strategy } => {
+                assert!(fields.is_empty());
+                assert_eq!(*strategy, MaskStrategy::Redact);
+            }
+            other => panic!("expected Mask, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -397,7 +444,7 @@ mod tests {
         for (expected, strategy_str) in toml_cases {
             let toml_str = format!(
                 r#"
-                [[transforms]]
+                [[pipeline]]
                 type = "mask"
                 fields = ["x"]
                 strategy = "{}"
@@ -405,7 +452,7 @@ mod tests {
                 strategy_str
             );
             let cfg: TransformConfig = toml::from_str(&toml_str).expect("deserialize mask");
-            match &cfg.transforms[0] {
+            match &cfg.pipeline[0] {
                 TransformDescriptor::Mask { strategy, .. } => {
                     assert_eq!(*strategy, expected);
                 }
@@ -450,7 +497,7 @@ mod tests {
         }
 
         // Dropped variant
-        assert_eq!(format!("{:?}", _drop), "Dropped");
+        assert_eq!(_drop, TransformResult::Dropped);
     }
 
     // -----------------------------------------------------------------------
@@ -460,7 +507,7 @@ mod tests {
     #[test]
     fn test_transform_descriptor_unknown_type() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "unknown"
         "#;
         let result: Result<TransformConfig, toml::de::Error> = toml::from_str(toml_str);
@@ -474,7 +521,7 @@ mod tests {
     #[test]
     fn test_transform_descriptor_filter_missing_script() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "filter"
         "#;
         let result: Result<TransformConfig, toml::de::Error> = toml::from_str(toml_str);
@@ -484,7 +531,7 @@ mod tests {
     #[test]
     fn test_transform_descriptor_map_missing_script() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "map"
         "#;
         let result: Result<TransformConfig, toml::de::Error> = toml::from_str(toml_str);
@@ -494,7 +541,7 @@ mod tests {
     #[test]
     fn test_transform_descriptor_mask_missing_fields() {
         let toml_str = r#"
-        [[transforms]]
+        [[pipeline]]
         type = "mask"
         "#;
         let result: Result<TransformConfig, toml::de::Error> = toml::from_str(toml_str);
