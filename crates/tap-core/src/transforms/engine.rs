@@ -79,6 +79,10 @@ impl TransformEngine {
 
         let mut store = Store::new(&engine, ());
 
+        // Prevent the epoch mechanism from interrupting during instantiation.
+        // We'll set a real deadline before each JS execution call.
+        store.set_epoch_deadline(u64::MAX);
+
         // ── linker: provide host imports for the Emscripten module ────
         let mut linker: Linker<()> = Linker::new(&engine);
         add_emscripten_stubs(&mut linker, &mut store)?;
@@ -122,7 +126,7 @@ fn add_emscripten_stubs(linker: &mut Linker<()>, store: &mut Store<()>) -> Resul
     let memory = wasmtime::Memory::new(&mut *store, mem_ty)
         .map_err(|e| TapError::Transform(format!("a.a memory: {e}")))?;
     QUICKJS_MEMORY
-        .set(memory.clone())
+        .set(memory)
         .map_err(|_| TapError::Transform("QUICKJS_MEMORY already set".into()))?;
 
     linker
