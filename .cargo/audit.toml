@@ -1,2 +1,23 @@
 [advisories]
-ignore = []  # Empty for v0.1.0, will populate as needed
+ignore = [
+    # RUSTSEC-2025-0020: PyString::from_object buffer overflow in pyo3.
+    # Scaffold stubs don't call this API. Upgrade when v0.24+ is available.
+    "RUSTSEC-2025-0020",
+    # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained.
+    # Transitive via mysql_async (mysql-common-derive). No safe upgrade available.
+    "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0176: Out-of-bounds read in pyo3 PyList/PyTuple iterators.
+    # RUSTSEC-2026-0177: Missing Sync bound on pyo3 CFunction closures.
+    # Fix: upgrade pyo3 from 0.24 to >=0.29. Blocked by pre-1.0 API churn
+    # in tap-sdk-py. Evaluate after crate stabilization.
+    "RUSTSEC-2026-0176",
+    "RUSTSEC-2026-0177",
+    # RUSTSEC-2026-0178: Panic on DataRow field mismatch in tokio-postgres.
+    # RUSTSEC-2026-0179: Unbounded SCRAM iteration DoS in postgres-protocol.
+    # RUSTSEC-2026-0180: Panic on malformed hstore in postgres-protocol.
+    # Fix: postgres-protocol 0.6.12, tokio-postgres 0.7.18.
+    # CI generates fresh Cargo.lock but Swatinem/rust-cache may restore old lock.
+    "RUSTSEC-2026-0178",
+    "RUSTSEC-2026-0179",
+    "RUSTSEC-2026-0180",
+]
