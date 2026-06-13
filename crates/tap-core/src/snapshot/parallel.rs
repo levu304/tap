@@ -48,6 +48,17 @@ use super::runner::{
 
 /// Run a parallel, chunked snapshot of Postgres tables.
 ///
+/// # Architecture
+///
+/// A persistent **run_id** (UUID v4) is generated at the start of each
+/// snapshot run and stored in [`StateStore`] instance info.  After a crash,
+/// the next invocation detects the stale run_id and resumes incomplete
+/// chunks rather than starting from scratch.
+///
+/// The Postgres-level exported snapshot ID (from `pg_export_snapshot()`)
+/// is kept separate — it changes every connection but does not affect chunk
+/// tracking, which uses the persistent `run_id`.
+///
 /// # Arguments
 ///
 /// * `keeper` — Connection that holds the exported snapshot for the full
@@ -82,6 +93,10 @@ pub async fn run_parallel_snapshot(
     db_name: String,
     event_tx: UnboundedSender<ChangeEvent>,
 ) -> Result<SnapshotResult, TapError> {
+    // ── 0. Resolve persistent run_id (resume across restarts) ────
+    let run_id = resolve_run_id(&state).await?;
+    info!("snapshot run_id={run_id}");
+
     // ── 1. Begin keeper transaction & export snapshot ─────────────
     keeper
         .batch_execute("BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ")
@@ -90,14 +105,15 @@ pub async fn run_parallel_snapshot(
     let export_result = export_snapshot_inner(&keeper).await;
 
     match export_result {
-        Ok((snapshot_id, lsn)) => {
-            info!("snapshot exported: id={snapshot_id}, lsn={lsn}");
+        Ok((pg_snapshot_id, lsn)) => {
+            info!("pg_snapshot exported: id={pg_snapshot_id}, lsn={lsn}");
 
             let result = run_snapshot_inner(
                 &keeper,
                 source_config,
                 &state,
-                &snapshot_id,
+                &run_id,
+                &pg_snapshot_id,
                 lsn,
                 config.num_workers,
                 config.batch_size as u32,
@@ -125,16 +141,54 @@ pub async fn run_parallel_snapshot(
 }
 
 // ---------------------------------------------------------------------------
+// Resume detection
+// ---------------------------------------------------------------------------
+
+/// Resolve a persistent run-id for this snapshot run.
+///
+/// Checks the state store for a previously stored `current_run_id`.  If one
+/// exists and has incomplete (non-completed) chunks, returns that id so the
+/// caller resumes from where the previous run left off.  Otherwise generates
+/// a fresh UUID and persists it.
+async fn resolve_run_id(state: &Arc<Mutex<StateStore>>) -> Result<String, TapError> {
+    let store = state.lock().await;
+    let stored = store.get_instance_info("current_run_id")?;
+    match stored {
+        Some(id) if !id.is_empty() => {
+            let incomplete = store.count_incomplete_chunks(&id)?;
+            if incomplete > 0 {
+                return Ok(id); // Resume mode
+            }
+            // Stale entry — all chunks completed or no chunks exist.
+            // Overwrite with a fresh run_id.
+            let new_id = uuid::Uuid::new_v4().to_string();
+            store.set_instance_info("current_run_id", &new_id)?;
+            Ok(new_id)
+        }
+        _ => {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            store.set_instance_info("current_run_id", &new_id)?;
+            Ok(new_id)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core orchestration
 // ---------------------------------------------------------------------------
 
 /// The inner snapshot loop (keeper transaction already active).
+///
+/// * `run_id` — Persistent chunk-grouping key (survives restarts for resume).
+/// * `pg_snapshot_id` — Postgres export-snapshot ID for `SET TRANSACTION
+///   SNAPSHOT` in worker connections.
 #[allow(clippy::too_many_arguments)]
 async fn run_snapshot_inner(
     keeper: &tokio_postgres::Client,
     source_config: &SourceConfig,
     state: &Arc<Mutex<StateStore>>,
-    snapshot_id: &str,
+    run_id: &str,
+    pg_snapshot_id: &str,
     lsn: Lsn,
     num_workers: u32,
     batch_size: u32,
@@ -146,7 +200,7 @@ async fn run_snapshot_inner(
     if tables.is_empty() {
         info!("no tables to snapshot");
         return Ok(SnapshotResult {
-            snapshot_id: snapshot_id.to_string(),
+            snapshot_id: run_id.to_string(),
             lsn,
             total_rows: 0,
             tables_snapshotted: Vec::new(),
@@ -161,22 +215,22 @@ async fn run_snapshot_inner(
         let pk_cols = detect_pk_columns(keeper, table).await?;
         let pk_str = pk_cols.first().cloned().unwrap_or_default();
 
-        // Load existing chunks for resume
+        // Load existing chunks for resume (keyed by persistent run_id)
         let existing = {
             let store = state.lock().await;
-            store.get_table_chunks(snapshot_id, &table.qualified)?
+            store.get_table_chunks(run_id, &table.qualified)?
         };
 
         let chunks = if pk_str.is_empty() {
             // No PK — single chunk only
             let num_chunks = 1u32;
-            generate_chunks(table, snapshot_id, "", None, num_chunks, &existing)
+            generate_chunks(table, run_id, "", None, num_chunks, &existing)
         } else {
             let pk_range = query_pk_range(keeper, table, &pk_str).await?;
             let num_per_table = (num_workers * 2).max(1);
             generate_chunks(
                 table,
-                snapshot_id,
+                run_id,
                 &pk_str,
                 pk_range.as_ref(),
                 num_per_table,
@@ -207,10 +261,10 @@ async fn run_snapshot_inner(
         // Reconstruct result from state store
         let total_rows = {
             let store = state.lock().await;
-            store.snapshot_chunk_total_rows(snapshot_id)?
+            store.snapshot_chunk_total_rows(run_id)?
         };
         return Ok(SnapshotResult {
-            snapshot_id: snapshot_id.to_string(),
+            snapshot_id: run_id.to_string(),
             lsn,
             total_rows,
             tables_snapshotted,
@@ -245,7 +299,8 @@ async fn run_snapshot_inner(
         let work_rx = Arc::clone(&work_rx);
         let state = Arc::clone(state);
         let event_tx = event_tx.clone();
-        let snapshot_id = snapshot_id.to_string();
+        let r_id = run_id.to_string();
+        let pg_id = pg_snapshot_id.to_string();
         let db_name = db_name.to_string();
         let error_flag = Arc::clone(&error_flag);
         let source_config = source_config.clone();
@@ -256,7 +311,8 @@ async fn run_snapshot_inner(
                 source_config,
                 work_rx,
                 state,
-                &snapshot_id,
+                &r_id,
+                &pg_id,
                 lsn,
                 batch_size,
                 &db_name,
@@ -299,11 +355,11 @@ async fn run_snapshot_inner(
     // ── 7. Compute final result ──────────────────────────────────
     let total_rows = {
         let store = state.lock().await;
-        store.snapshot_chunk_total_rows(snapshot_id)?
+        store.snapshot_chunk_total_rows(run_id)?
     };
 
     info!(
-        snapshot_id = %snapshot_id,
+        run_id = %run_id,
         lsn = %lsn,
         total_rows,
         tables = %tables_snapshotted.len(),
@@ -311,7 +367,7 @@ async fn run_snapshot_inner(
     );
 
     Ok(SnapshotResult {
-        snapshot_id: snapshot_id.to_string(),
+        snapshot_id: run_id.to_string(),
         lsn,
         total_rows,
         tables_snapshotted,
@@ -410,13 +466,18 @@ async fn resolve_tables_inner(
 /// 2. Pins a REPEATABLE READ transaction to the exported snapshot.
 /// 3. Loops: pops a chunk from the shared work queue → scans it → records
 ///    progress → marks chunk complete.
+///
+/// * `run_id` — Persistent chunk-grouping key (for state store operations).
+/// * `pg_snapshot_id` — Postgres export-snapshot ID (for `SET TRANSACTION
+///   SNAPSHOT`).
 #[allow(clippy::too_many_arguments)]
 async fn worker_main(
     worker_id: u32,
     source_config: SourceConfig,
     work_rx: Arc<Mutex<mpsc::Receiver<SnapshotChunk>>>,
     state: Arc<Mutex<StateStore>>,
-    snapshot_id: &str,
+    run_id: &str,
+    pg_snapshot_id: &str,
     lsn: Lsn,
     batch_size: u32,
     db_name: &str,
@@ -434,7 +495,8 @@ async fn worker_main(
         worker_id,
         work_rx,
         state,
-        snapshot_id,
+        run_id,
+        pg_snapshot_id,
         lsn,
         batch_size,
         db_name,
@@ -451,24 +513,29 @@ async fn worker_main(
 }
 
 /// Inner loop: claim chunks, scan, record progress.
+///
+/// * `run_id` — Persistent chunk-grouping key (for state store operations).
+/// * `pg_snapshot_id` — Postgres export-snapshot ID for `SET TRANSACTION
+///   SNAPSHOT`.
 #[allow(clippy::too_many_arguments)]
 async fn worker_loop(
     client: &mut tokio_postgres::Client,
     worker_id: u32,
     work_rx: Arc<Mutex<mpsc::Receiver<SnapshotChunk>>>,
     state: Arc<Mutex<StateStore>>,
-    snapshot_id: &str,
+    run_id: &str,
+    pg_snapshot_id: &str,
     lsn: Lsn,
     batch_size: u32,
     db_name: &str,
     event_tx: &UnboundedSender<ChangeEvent>,
     error_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), TapError> {
-    // Start a REPEATABLE READ transaction for this worker
+    // Start a REPEATABLE READ transaction pinned to the exported snapshot
     let txn = client.transaction().await?;
     txn.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .await?;
-    txn.simple_query(&format!("SET TRANSACTION SNAPSHOT '{snapshot_id}'"))
+    txn.simple_query(&format!("SET TRANSACTION SNAPSHOT '{pg_snapshot_id}'"))
         .await?;
 
     let ts_ms = SystemTime::now()
@@ -502,7 +569,7 @@ async fn worker_loop(
         // Mark in_progress in state store
         {
             let store = state.lock().await;
-            store.start_chunk(snapshot_id, &chunk.table_name, chunk.chunk_index)?;
+            store.start_chunk(run_id, &chunk.table_name, chunk.chunk_index)?;
         }
 
         // ── Detect PK for this table ─────────────────────────────
@@ -529,7 +596,7 @@ async fn worker_loop(
                 {
                     let store = state.lock().await;
                     store.complete_chunk(
-                        snapshot_id,
+                        run_id,
                         &chunk.table_name,
                         chunk.chunk_index,
                         rows_count,
@@ -555,7 +622,7 @@ async fn worker_loop(
                 {
                     let store = state.lock().await;
                     store.fail_chunk(
-                        snapshot_id,
+                        run_id,
                         &chunk.table_name,
                         chunk.chunk_index,
                         &e.to_string(),

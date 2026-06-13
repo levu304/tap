@@ -538,6 +538,20 @@ impl StateStore {
         Ok(count as u64)
     }
 
+    /// Count chunks that are NOT completed for a snapshot run.
+    ///
+    /// Returns 0 when the run is either fully completed or has no chunks
+    /// at all (both cases mean "no resume needed").
+    pub fn count_incomplete_chunks(&self, snapshot_id: &str) -> Result<u64, TapError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM snapshot_chunks
+             WHERE snapshot_id = ?1 AND status != 'completed'",
+            params![snapshot_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
     /// Get the total row count across all completed chunks for a snapshot.
     pub fn snapshot_chunk_total_rows(&self, snapshot_id: &str) -> Result<u64, TapError> {
         let total: i64 = self.conn.query_row(
@@ -1204,6 +1218,61 @@ mod tests {
         assert_eq!(lsn, format!("0/{:08X}", 0x1002));
 
         drop(conn2);
+        cleanup(&config);
+    }
+
+    // ------------------------------------------------------------------
+    // Test 17: count_incomplete_chunks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_store_count_incomplete_chunks() {
+        let config = temp_config("incomplete_chunks");
+        let store = StateStore::open(&config).expect("open store");
+
+        // No chunks yet → 0 incomplete
+        assert_eq!(
+            store.count_incomplete_chunks("run_1").expect("count empty"),
+            0
+        );
+
+        // Insert a completed chunk
+        store
+            .write_chunk("public.t", "run_1", 0, Some("1"), Some("10"))
+            .expect("write chunk 0");
+        store
+            .complete_chunk("run_1", "public.t", 0, 9)
+            .expect("complete chunk 0");
+
+        // Still 0 incomplete
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_1")
+                .expect("count after complete"),
+            0
+        );
+
+        // Insert a pending chunk (ON CONFLICT DO NOTHING, so different index)
+        store
+            .write_chunk("public.t", "run_1", 1, Some("10"), Some("20"))
+            .expect("write chunk 1");
+
+        // Now 1 incomplete
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_1")
+                .expect("count after pending"),
+            1
+        );
+
+        // Different run_id → 0
+        assert_eq!(
+            store
+                .count_incomplete_chunks("run_other")
+                .expect("count other"),
+            0
+        );
+
         cleanup(&config);
     }
 }
