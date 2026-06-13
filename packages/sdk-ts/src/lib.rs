@@ -43,7 +43,7 @@ impl From<&tap_core::event::SourceMetadata> for JsSourceMetadata {
             db: s.db.clone(),
             schema: s.schema.clone(),
             table: s.table.clone(),
-            lsn: s.lsn.to_string(),
+            lsn: s.lsn.clone().unwrap_or_default(),
             tx_id: s.tx_id.clone(),
             ts_ms: s.ts_ms as f64,
             snapshot: s.snapshot,

@@ -370,7 +370,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                             let mut health = sse.health_state().write().await;
                             health.events_captured += count;
                             if let Some(first) = events.first() {
-                                health.current_lsn = first.source.lsn.to_string();
+                                health.current_lsn = first.source.lsn.clone().unwrap_or_default();
                             }
                         }
 
@@ -383,7 +383,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                             .or_else(|| replication_stream.current_lsn())
                             .or_else(|| {
                                 events.first()
-                                    .and_then(|e| e.source.lsn.0.parse::<Lsn>().ok())
+                                    .and_then(|e| e.source.lsn.as_deref().and_then(|s| s.parse::<Lsn>().ok()))
                             });
                         let checkpoint_tx = events.first()
                             .map(|e| e.source.tx_id.clone());
