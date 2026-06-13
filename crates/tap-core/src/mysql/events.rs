@@ -250,7 +250,10 @@ pub fn column_to_column_info(col: &mysql_async::Column) -> ColumnInfo {
 /// metadata (`Arc<[Column]>`), so no external table-map lookup is needed
 /// for basic name+type extraction.
 pub fn binlog_row_columns(row: &mysql_async::binlog::row::BinlogRow) -> Vec<ColumnInfo> {
-    row.columns_ref().iter().map(column_to_column_info).collect()
+    row.columns_ref()
+        .iter()
+        .map(column_to_column_info)
+        .collect()
 }
 
 /// Convert a `BinlogRow` to the local [`RowData`] type.
@@ -517,12 +520,12 @@ fn parse_rows_event(
                         let before_row = before.map(|r| binlog_row_to_row_data(&r));
                         let after_row = after.map(|r| binlog_row_to_row_data(&r));
                         rows.push((
-                        before_row.unwrap_or(RowData {
-                            values: serde_json::Value::Null,
-                        }),
-                        after_row.unwrap_or(RowData {
-                            values: serde_json::Value::Null,
-                        }),
+                            before_row.unwrap_or(RowData {
+                                values: serde_json::Value::Null,
+                            }),
+                            after_row.unwrap_or(RowData {
+                                values: serde_json::Value::Null,
+                            }),
                         ));
                     }
                     Err(e) => {
@@ -634,6 +637,126 @@ fn parse_rows_event(
                 source,
             })]
         }
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Event processing
+// ──────────────────────────────────────────────
+
+/// Convert a parsed [`MySqlBinlogEvent`] into zero or more [`ChangeEvent`]s
+/// with Debezium-style operation codes.
+///
+/// | MySQL event     | Op code | `before`  | `after`   |
+/// |-----------------|---------|-----------|-----------|
+/// | `WriteRows`     | `'c'`   | `None`    | row image |
+/// | `UpdateRows`    | `'u'`   | old image | new image |
+/// | `DeleteRows`    | `'d'`   | row image | `None`    |
+///
+/// Each row in a multi-row binlog event produces a separate [`ChangeEvent`],
+/// with the row index appended to the event ID for disambiguation:
+/// `{binlog_file}:{binlog_offset}:{tx_id}:{row_index}`.
+///
+/// Non-row events (TableMap, Rotate, Xid, Query) are metadata and return an
+/// empty vec.
+///
+/// # Examples
+///
+/// ```
+/// use tap_core::mysql::events::{
+///     MySqlBinlogEvent, WriteRowsData, RowData, MySqlSourceMetadata,
+///     process_binlog_event,
+/// };
+/// use tap_core::event::Operation;
+///
+/// let event = MySqlBinlogEvent::WriteRows(WriteRowsData {
+///     table_id: 1,
+///     rows: vec![RowData { values: serde_json::json!({"id": 1}) }],
+///     source: MySqlSourceMetadata {
+///         db: "test".into(),
+///         table: "t".into(),
+///         binlog_file: "mysql-bin.000001".into(),
+///         binlog_offset: 42,
+///         tx_id: "GTID-1".into(),
+///         ts_ms: 1_700_000_000_000,
+///         snapshot: None,
+///     },
+/// });
+///
+/// let events = process_binlog_event(event);
+/// assert_eq!(events.len(), 1);
+/// assert_eq!(events[0].op, Operation::Create);
+/// assert_eq!(events[0].after.as_ref().unwrap().get("id"), Some(&serde_json::json!(1)));
+/// ```
+pub fn process_binlog_event(event: MySqlBinlogEvent) -> Vec<ChangeEvent> {
+    match event {
+        MySqlBinlogEvent::WriteRows(data) => data
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                build_change_event(Operation::Create, None, Some(row.values), &data.source, idx)
+            })
+            .collect(),
+
+        MySqlBinlogEvent::UpdateRows(data) => data
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (before, after))| {
+                build_change_event(
+                    Operation::Update,
+                    Some(before.values),
+                    Some(after.values),
+                    &data.source,
+                    idx,
+                )
+            })
+            .collect(),
+
+        MySqlBinlogEvent::DeleteRows(data) => data
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                build_change_event(Operation::Delete, Some(row.values), None, &data.source, idx)
+            })
+            .collect(),
+
+        // TableMap, Rotate, Xid, Query — metadata only, no row change
+        _ => Vec::new(),
+    }
+}
+
+/// Build a single [`ChangeEvent`] from row-level data.
+///
+/// The event `id` is `{binlog_file}:{binlog_offset}:{tx_id}:{row_idx}` so
+/// rows within the same binlog event receive distinct identifiers.
+fn build_change_event(
+    op: Operation,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+    source: &MySqlSourceMetadata,
+    row_idx: usize,
+) -> ChangeEvent {
+    ChangeEvent {
+        op,
+        before,
+        after,
+        source: SourceMetadata {
+            db: source.db.clone(),
+            schema: String::new(),
+            table: source.table.clone(),
+            lsn: String::new().parse().unwrap(),
+            tx_id: source.tx_id.clone(),
+            ts_ms: source.ts_ms,
+            snapshot: source.snapshot,
+        },
+        ts_ms: source.ts_ms,
+        id: format!(
+            "{}:{}:{}:{}",
+            source.binlog_file, source.binlog_offset, source.tx_id, row_idx,
+        ),
     }
 }
 
@@ -927,10 +1050,7 @@ mod tests {
                     position: 0,
                 }),
             ),
-            (
-                "Xid",
-                MySqlBinlogEvent::Xid(XidEventData { xid: 0 }),
-            ),
+            ("Xid", MySqlBinlogEvent::Xid(XidEventData { xid: 0 })),
             (
                 "Query",
                 MySqlBinlogEvent::Query(QueryEventData {
@@ -949,6 +1069,151 @@ mod tests {
             assert!(
                 json.contains(&tag),
                 "Expected tag {tag:?} in JSON for variant {expected_tag}, got {json}"
+            );
+        }
+    }
+
+    // -- process_binlog_event ---------------------------------------
+
+    fn sample_source() -> MySqlSourceMetadata {
+        MySqlSourceMetadata {
+            db: "test".into(),
+            table: "users".into(),
+            binlog_file: "mysql-bin.000001".into(),
+            binlog_offset: 42,
+            tx_id: "GTID-1".into(),
+            ts_ms: 1_700_000_000_000,
+            snapshot: None,
+        }
+    }
+
+    #[test]
+    fn test_process_write_rows() {
+        let event = MySqlBinlogEvent::WriteRows(WriteRowsData {
+            table_id: 1,
+            rows: vec![RowData {
+                values: serde_json::json!({"id": 1, "name": "Alice"}),
+            }],
+            source: sample_source(),
+        });
+
+        let events = process_binlog_event(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].op, Operation::Create);
+        assert_eq!(events[0].before, None);
+        assert_eq!(
+            events[0].after,
+            Some(serde_json::json!({"id": 1, "name": "Alice"})),
+        );
+        assert_eq!(events[0].source.db, "test");
+        assert_eq!(events[0].source.table, "users");
+        // MySQL events have an empty LSN (Postgres concept, not applicable)
+        assert_eq!(events[0].source.lsn.to_string(), "");
+    }
+
+    #[test]
+    fn test_process_update_rows() {
+        let event = MySqlBinlogEvent::UpdateRows(UpdateRowsData {
+            table_id: 1,
+            rows: vec![(
+                RowData {
+                    values: serde_json::json!({"id": 1, "name": "Alice"}),
+                },
+                RowData {
+                    values: serde_json::json!({"id": 1, "name": "Bob"}),
+                },
+            )],
+            source: sample_source(),
+        });
+
+        let events = process_binlog_event(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].op, Operation::Update);
+        assert_eq!(
+            events[0].before,
+            Some(serde_json::json!({"id": 1, "name": "Alice"})),
+        );
+        assert_eq!(
+            events[0].after,
+            Some(serde_json::json!({"id": 1, "name": "Bob"})),
+        );
+    }
+
+    #[test]
+    fn test_process_delete_rows() {
+        let event = MySqlBinlogEvent::DeleteRows(DeleteRowsData {
+            table_id: 1,
+            rows: vec![RowData {
+                values: serde_json::json!({"id": 99}),
+            }],
+            source: sample_source(),
+        });
+
+        let events = process_binlog_event(event);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].op, Operation::Delete);
+        assert_eq!(events[0].before, Some(serde_json::json!({"id": 99})),);
+        assert_eq!(events[0].after, None);
+    }
+
+    #[test]
+    fn test_process_multi_row_write() {
+        let event = MySqlBinlogEvent::WriteRows(WriteRowsData {
+            table_id: 1,
+            rows: vec![
+                RowData {
+                    values: serde_json::json!({"id": 1}),
+                },
+                RowData {
+                    values: serde_json::json!({"id": 2}),
+                },
+                RowData {
+                    values: serde_json::json!({"id": 3}),
+                },
+            ],
+            source: sample_source(),
+        });
+
+        let events = process_binlog_event(event);
+        assert_eq!(events.len(), 3);
+        // Each row gets a unique ID with its index
+        assert_eq!(events[0].id, "mysql-bin.000001:42:GTID-1:0");
+        assert_eq!(events[1].id, "mysql-bin.000001:42:GTID-1:1");
+        assert_eq!(events[2].id, "mysql-bin.000001:42:GTID-1:2");
+        // All have Create op
+        for ev in &events {
+            assert_eq!(ev.op, Operation::Create);
+        }
+    }
+
+    #[test]
+    fn test_process_non_row_events_return_empty() {
+        let non_row_cases: Vec<MySqlBinlogEvent> = vec![
+            MySqlBinlogEvent::TableMap(TableMapEventData {
+                table_id: 1,
+                db: "test".into(),
+                table: "users".into(),
+                num_columns: 2,
+                columns: vec![],
+            }),
+            MySqlBinlogEvent::Rotate(RotateEventData {
+                next_binlog_file: "mysql-bin.000002".into(),
+                position: 4,
+            }),
+            MySqlBinlogEvent::Xid(XidEventData { xid: 12345 }),
+            MySqlBinlogEvent::Query(QueryEventData {
+                thread_id: 1,
+                execution_time: 0,
+                error_code: 0,
+                schema: "test".into(),
+                query: "BEGIN".into(),
+            }),
+        ];
+
+        for event in non_row_cases {
+            assert!(
+                process_binlog_event(event).is_empty(),
+                "non-row event should produce zero ChangeEvents",
             );
         }
     }

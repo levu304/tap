@@ -22,9 +22,9 @@ use serde_json::{Map, Value as JsonValue};
 /// participate in `#[derive(Serialize, Deserialize)]`.
 pub mod col_type_serde {
     use mysql_async::consts::ColumnType;
+    use serde::Deserialize;
     use serde::de;
     use serde::ser;
-    use serde::Deserialize;
 
     pub fn serialize<S>(ct: &ColumnType, serializer: S) -> Result<S::Ok, S::Error>
     where
