@@ -63,12 +63,12 @@ pub(crate) struct TableInfo {
 }
 
 /// Quote a Postgres identifier, escaping embedded double-quotes.
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Build a safely-quoted `schema.table` for use in SQL.
-fn qualified_sql(table: &TableInfo) -> String {
+pub(crate) fn qualified_sql(table: &TableInfo) -> String {
     format!(
         "{}.{}",
         quote_ident(&table.schema),
@@ -78,7 +78,7 @@ fn qualified_sql(table: &TableInfo) -> String {
 
 /// Split a `schema.table` string into its components.
 /// If no dot is present, `"public"` is used as the schema.
-fn parse_qualified_name(qualified: &str) -> TableInfo {
+pub(crate) fn parse_qualified_name(qualified: &str) -> TableInfo {
     match qualified.split_once('.') {
         Some((schema, name)) => TableInfo {
             schema: schema.to_string(),
@@ -99,7 +99,7 @@ fn parse_qualified_name(qualified: &str) -> TableInfo {
 /// correct Rust type, then serialises to JSON.  Handles common types:
 /// integer, float, bool, text, json/jsonb, and date/time.  Falls back to
 /// a string representation for unknown types.
-fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
+pub(crate) fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
     let columns = row.columns();
     let mut map = serde_json::Map::with_capacity(columns.len());
 
@@ -175,7 +175,7 @@ fn row_to_json(row: &Row) -> Result<serde_json::Value, TapError> {
 ///
 /// For tables without a PK a UUID-based fallback is used:
 ///   `snap:{schema}.{table}:{uuid}`
-fn build_snapshot_event_id(
+pub(crate) fn build_snapshot_event_id(
     table: &TableInfo,
     pk_columns: &[String],
     row: &Row,
@@ -533,7 +533,7 @@ impl SnapshotRunner {
             .await?;
 
         // ── Detect primary key columns  ───────────────────────────────
-        let pk_columns = Self::detect_pk_columns(txn.client(), table).await?;
+        let pk_columns = detect_pk_columns(txn.client(), table).await?;
 
         if pk_columns.is_empty() {
             warn!(
@@ -579,7 +579,7 @@ impl SnapshotRunner {
 
             for row in &batch {
                 // Build the ChangeEvent for this row
-                Self::emit_row_event(
+                emit_row_event(
                     &self.event_tx,
                     table,
                     &pk_columns,
@@ -639,87 +639,6 @@ impl SnapshotRunner {
         Ok(rows_done)
     }
 
-    /// Build and send a single row event via the channel.
-    fn emit_row_event(
-        event_tx: &tokio::sync::mpsc::UnboundedSender<ChangeEvent>,
-        table: &TableInfo,
-        pk_columns: &[String],
-        snapshot_lsn: &Lsn,
-        ts_ms: u64,
-        db_name: &str,
-        row: &Row,
-    ) -> Result<(), TapError> {
-        let row_json = row_to_json(row)?;
-
-        // Check individual row size (serialized JSON)
-        if let Some(size) = estimate_row_size(&row_json) {
-            if size > 1_048_576 {
-                // 1 MB
-                warn!(
-                    table = %table.qualified,
-                    size_bytes = size,
-                    "row exceeds 1 MB — streaming as-is, no chunking applied"
-                );
-            }
-        }
-
-        let source = SourceMetadata {
-            db: db_name.to_string(),
-            schema: table.schema.clone(),
-            table: table.name.clone(),
-            lsn: crate::event::Lsn(snapshot_lsn.to_string()),
-            tx_id: "0".into(),
-            ts_ms,
-            snapshot: Some(true),
-        };
-
-        let mut event = ChangeEventBuilder::new()
-            .op(Operation::Read)
-            .after(Some(row_json))
-            .source(source)
-            .build()?;
-
-        // Override the auto-generated ID with PK-based format
-        event.id = build_snapshot_event_id(table, pk_columns, row)?;
-
-        if event_tx.send(event).is_err() {
-            return Err(TapError::Snapshot(
-                "event channel closed while snapshotting table".into(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // PK detection
-    // -----------------------------------------------------------------------
-
-    /// Detect primary-key column names for a table, in index order.
-    ///
-    /// `client` can be a plain `Client` or `Transaction` (via `Deref`).
-    async fn detect_pk_columns(
-        client: &tokio_postgres::Client,
-        table: &TableInfo,
-    ) -> Result<Vec<String>, TapError> {
-        let rows = client
-            .query(
-                "SELECT a.attname \
-                 FROM pg_index i \
-                 JOIN pg_attribute a \
-                   ON a.attrelid = i.indrelid \
-                  AND a.attnum = ANY(i.indkey::int2[]) \
-                 WHERE i.indrelid = to_regclass($1) \
-                   AND i.indisprimary \
-                 ORDER BY a.attnum",
-                &[&table.qualified],
-            )
-            .await?;
-
-        let pks: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-        Ok(pks)
-    }
-
     // -----------------------------------------------------------------------
     // State store helpers (async, tokio::sync::Mutex)
     // -----------------------------------------------------------------------
@@ -759,9 +678,86 @@ impl SnapshotRunner {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Build and send a single row event via the channel.
+pub(crate) fn emit_row_event(
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ChangeEvent>,
+    table: &TableInfo,
+    pk_columns: &[String],
+    snapshot_lsn: &Lsn,
+    ts_ms: u64,
+    db_name: &str,
+    row: &Row,
+) -> Result<(), TapError> {
+    let row_json = row_to_json(row)?;
+
+    // Check individual row size (serialized JSON)
+    if let Some(size) = estimate_row_size(&row_json) {
+        if size > 1_048_576 {
+            // 1 MB
+            warn!(
+                table = %table.qualified,
+                size_bytes = size,
+                "row exceeds 1 MB — streaming as-is, no chunking applied"
+            );
+        }
+    }
+
+    let source = SourceMetadata {
+        db: db_name.to_string(),
+        schema: table.schema.clone(),
+        table: table.name.clone(),
+        lsn: crate::event::Lsn(snapshot_lsn.to_string()),
+        tx_id: "0".into(),
+        ts_ms,
+        snapshot: Some(true),
+    };
+
+    let mut event = ChangeEventBuilder::new()
+        .op(Operation::Read)
+        .after(Some(row_json))
+        .source(source)
+        .build()?;
+
+    // Override the auto-generated ID with PK-based format
+    event.id = build_snapshot_event_id(table, pk_columns, row)?;
+
+    if event_tx.send(event).is_err() {
+        return Err(TapError::Snapshot(
+            "event channel closed while snapshotting table".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Detect primary-key column names for a table, in index order.
+///
+/// `client` can be a plain `Client` or `Transaction` (via `Deref`).
+pub(crate) async fn detect_pk_columns(
+    client: &tokio_postgres::Client,
+    table: &TableInfo,
+) -> Result<Vec<String>, TapError> {
+    let rows = client
+        .query(
+            "SELECT a.attname \
+             FROM pg_index i \
+             JOIN pg_attribute a \
+               ON a.attrelid = i.indrelid \
+              AND a.attnum = ANY(i.indkey::int2[]) \
+             WHERE i.indrelid = to_regclass($1) \
+               AND i.indisprimary \
+             ORDER BY a.attnum",
+            &[&table.qualified],
+        )
+        .await?;
+
+    let pks: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    Ok(pks)
+}
+
 /// Estimate the serialized byte size of a JSON value.
 /// Returns `None` when the size cannot be determined.
-fn estimate_row_size(value: &serde_json::Value) -> Option<usize> {
+pub(crate) fn estimate_row_size(value: &serde_json::Value) -> Option<usize> {
     Some(value.to_string().len())
 }
 
