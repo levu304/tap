@@ -669,8 +669,7 @@ mod tests {
             password: "p".into(),
             tables: vec!["users".into(), "orders".into()],
             server_id: 1,
-            binlog_file: None,
-            binlog_offset: None,
+            ..Default::default()
         };
         let snap = SnapshotConfig {
             batch_size: 1000,
@@ -697,8 +696,7 @@ mod tests {
             password: String::new(),
             tables: vec!["ignored".into()],
             server_id: 1,
-            binlog_file: None,
-            binlog_offset: None,
+            ..Default::default()
         };
         let snap = SnapshotConfig {
             batch_size: 1000,
@@ -723,8 +721,7 @@ mod tests {
             password: String::new(),
             tables: vec![],
             server_id: 1,
-            binlog_file: None,
-            binlog_offset: None,
+            ..Default::default()
         };
         let snap = SnapshotConfig {
             batch_size: 1000,
@@ -747,8 +744,7 @@ mod tests {
             password: String::new(),
             tables: vec![],
             server_id: 1,
-            binlog_file: None,
-            binlog_offset: None,
+            ..Default::default()
         };
         let snap = SnapshotConfig {
             batch_size: 1000,

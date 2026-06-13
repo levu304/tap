@@ -335,6 +335,17 @@ pub struct MySqlSourceConfig {
     /// Resume from a specific binlog offset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binlog_offset: Option<u64>,
+    /// Binlog retention warning threshold in seconds (default: 86400 = 24h).
+    ///
+    /// A warning is emitted during pre-flight checks when
+    /// `binlog_expire_logs_seconds` or `expire_logs_days` is below this
+    /// threshold.  Set to 0 to disable the warning.
+    #[serde(default = "default_binlog_retention_threshold")]
+    pub binlog_retention_warning_threshold: u64,
+}
+
+const fn default_binlog_retention_threshold() -> u64 {
+    86_400 // 24 hours
 }
 
 impl Default for MySqlSourceConfig {
@@ -349,6 +360,7 @@ impl Default for MySqlSourceConfig {
             server_id: 12345,
             binlog_file: None,
             binlog_offset: None,
+            binlog_retention_warning_threshold: default_binlog_retention_threshold(),
         }
     }
 }
