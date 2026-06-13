@@ -151,16 +151,37 @@ impl ChangeEventBuilder {
     }
 
     /// Generates a unique event identifier from source metadata.
+    ///
+    /// ## Determinism
+    ///
+    /// | Source | Fields used | Format |
+    /// |--------|-------------|--------|
+    /// | Postgres (streaming) | `lsn` + `tx_id` | `{lsn}:{tx_id}` |
+    /// | MySQL (streaming) | `binlog_file` + `binlog_offset` + `tx_id` | `{file}:{offset}:{tx_id}` |
+    /// | Snapshot (any) | random UUID suffix | `snap:{schema}.{table}:{uuid}` |
+    /// | Fallback | random UUID | bare UUID |
+    ///
+    /// Deterministic IDs are essential for downstream deduplication — the same
+    /// source position always produces the same event ID, enabling safe retry
+    /// and exactly-once semantics.
     fn generate_id(source: &SourceMetadata) -> String {
         match source.snapshot {
             Some(true) => {
+                // Snapshot IDs are unique-per-run; determinism not required.
                 let short = Uuid::new_v4().to_string();
                 format!("snap:{}.{}:{}", source.schema, source.table, short)
             }
             _ => {
                 if let Some(ref lsn) = source.lsn {
+                    // Postgres: deterministic from WAL position + transaction ID
                     format!("{}:{}", lsn, source.tx_id)
+                } else if let (Some(ref file), Some(offset)) =
+                    (source.binlog_file.clone(), source.binlog_offset)
+                {
+                    // MySQL: deterministic from binlog position + transaction ID
+                    format!("{}:{}:{}", file, offset, source.tx_id)
                 } else {
+                    // No position metadata available (should not occur in practice).
                     Uuid::new_v4().to_string()
                 }
             }

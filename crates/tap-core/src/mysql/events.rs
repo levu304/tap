@@ -273,13 +273,25 @@ pub fn binlog_row_to_row_data(row: &mysql_async::binlog::row::BinlogRow) -> RowD
     for (i, col) in columns.iter().enumerate() {
         let value = match row.as_ref(i) {
             Some(BinlogValue::Value(v)) => crate::mysql::types::mysql_value_to_json(v),
-            Some(BinlogValue::Jsonb(_)) => {
-                // JSONB not yet handled; emit a placeholder
-                serde_json::Value::String("[jsonb]".to_string())
+            Some(BinlogValue::Jsonb(jsonb_val)) => {
+                // Decode MySQL's internal binary JSON (JSONB) to serde_json::Value.
+                // mysql_common provides a TryFrom impl that handles all JSONB types
+                // (arrays, objects, scalars, opaques).
+                match serde_json::Value::try_from(jsonb_val.clone()) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        tracing::warn!(?e, "Failed to decode JSONB value, substituting null");
+                        serde_json::Value::Null
+                    }
+                }
             }
             Some(BinlogValue::JsonDiff(_)) => {
-                // JSON diff not yet handled; emit a placeholder
-                serde_json::Value::String("[jsondiff]".to_string())
+                // JSON diff (partial update) cannot be applied without the
+                // previous JSON value, which we do not carry across events.
+                tracing::warn!(
+                    "JSON diff in binlog event — cannot decode without prior state, emitting null"
+                );
+                serde_json::Value::Null
             }
             None => serde_json::Value::Null,
         };
