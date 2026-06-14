@@ -162,10 +162,13 @@ fn mask_value(
     match strategy {
         MaskStrategy::Redact => Ok(serde_json::Value::String("***REDACTED***".into())),
         MaskStrategy::Hash => {
-            let input: Vec<u8> = match &value {
-                serde_json::Value::String(s) => s.as_bytes().to_vec(),
-                other => other.to_string().into_bytes(),
-            };
+            // Use a single canonical byte representation for all JSON
+            // types via serde_json serialization.  Using `serde_json::to_string`
+            // ensures String("42") and Number(42) produce different byte
+            // sequences (the former includes JSON quotes).
+            let input = serde_json::to_string(&value)
+                .map_err(|_| "failed to serialize JSON value for hashing")?
+                .into_bytes();
             let mut mac = Hmac::<Sha256>::new_from_slice(HMAC_DEFAULT_KEY)
                 .map_err(|_| "invalid HMAC key length")?;
             mac.update(&input);
@@ -383,6 +386,28 @@ mod tests {
         let event = expect_modified(apply_mask(event, &desc));
         let masked = event.after.as_ref().and_then(|v| v.get("active"));
         assert!(masked.unwrap().is_string());
+    }
+
+    #[test]
+    fn hash_string_and_number_produce_distinct_hashes() {
+        // Regression: String("42") must NOT produce the same hash as Number(42).
+        // The Hash strategy must use a canonical byte representation that
+        // distinguishes between JSON types (strings include JSON quotes).
+        let desc = make_descriptor(vec!["field"], MaskStrategy::Hash);
+
+        let e_str = expect_modified(apply_mask(
+            make_event(Some(serde_json::json!({"field": "42"}))),
+            &desc,
+        ));
+        let h_str = e_str.after.unwrap()["field"].as_str().unwrap().to_string();
+
+        let e_num = expect_modified(apply_mask(
+            make_event(Some(serde_json::json!({"field": 42}))),
+            &desc,
+        ));
+        let h_num = e_num.after.unwrap()["field"].as_str().unwrap().to_string();
+
+        assert_ne!(h_str, h_num, "String and Number must hash differently");
     }
 
     // ── Null ───────────────────────────────────────────────────────────
