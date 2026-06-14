@@ -98,7 +98,17 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
 /// Walk a dot-separated path into a JSON value tree and mask the leaf.
 ///
 /// Returns `true` if a value was actually modified.
+///
+/// If `path` contains empty segments (e.g. `"user..email"` or `".email"`)
+/// the function silently returns `false` — the path is invalid, so no
+/// value is modified.
 fn traverse_and_mask(value: &mut serde_json::Value, path: &str, strategy: MaskStrategy) -> bool {
+    // Reject paths with empty segments (leading/trailing dots, double
+    // dots) so configuration typos don't silently skip masking.
+    if path.is_empty() || path.split('.').any(|s| s.is_empty()) {
+        return false;
+    }
+
     let mut segments = path.split('.');
     // Peel the leaf segment off the end; remaining segments are parents.
     let leaf = segments.next_back();
@@ -420,6 +430,45 @@ mod tests {
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
         let result = apply_mask(&mut event, &desc);
         assert!(matches!(result, TransformResult::Modified(_)));
+    }
+
+    #[test]
+    fn empty_path_segment_skips_masking() {
+        // A path with an empty segment (e.g., "user..email") must not mask
+        // the field — the path is invalid and should silently pass through.
+        let mut event = make_event(Some(serde_json::json!({"user": {"email": "a@b.com"}})));
+        let desc = make_descriptor(vec!["user..email"], MaskStrategy::Redact);
+        let result = apply_mask(&mut event, &desc);
+        assert_eq!(result, TransformResult::PassThrough);
+        // The field must remain unmasked.
+        assert_eq!(
+            event.after.as_ref().and_then(|v| v.pointer("/user/email")),
+            Some(&serde_json::json!("a@b.com"))
+        );
+    }
+
+    #[test]
+    fn leading_dot_path_skips_masking() {
+        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let desc = make_descriptor(vec![".email"], MaskStrategy::Redact);
+        let result = apply_mask(&mut event, &desc);
+        assert_eq!(result, TransformResult::PassThrough);
+    }
+
+    #[test]
+    fn trailing_dot_path_skips_masking() {
+        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let desc = make_descriptor(vec!["email."], MaskStrategy::Redact);
+        let result = apply_mask(&mut event, &desc);
+        assert_eq!(result, TransformResult::PassThrough);
+    }
+
+    #[test]
+    fn empty_path_skips_masking() {
+        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let desc = make_descriptor(vec![""], MaskStrategy::Redact);
+        let result = apply_mask(&mut event, &desc);
+        assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
