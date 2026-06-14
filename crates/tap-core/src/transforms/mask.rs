@@ -251,6 +251,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redact_delete_event_before_only() {
+        // A delete event has `before: Some(...)` and `after: None`.
+        // Masking must apply to the `before` value.
+        let mut event = ChangeEvent {
+            op: Operation::Delete,
+            before: Some(serde_json::json!({"email": "delete@example.com"})),
+            after: None,
+            ..make_event(None)
+        };
+        let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
+        let result = apply_mask(&mut event, &desc);
+        assert!(matches!(result, TransformResult::Modified(_)));
+        assert_eq!(
+            event.before.as_ref().and_then(|v| v.get("email")),
+            Some(&serde_json::json!("***REDACTED***"))
+        );
+    }
+
     // ── Hash ───────────────────────────────────────────────────────────
 
     #[test]
