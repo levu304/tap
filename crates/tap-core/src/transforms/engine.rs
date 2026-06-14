@@ -14,9 +14,8 @@
 //! v0.32.0).
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
-use wasmtime::{Caller, Engine, FuncType, Instance, Linker, Module, Store, Val, ValType};
+use wasmtime::{Caller, Engine, FuncType, Instance, Linker, Memory, Module, Store, Val, ValType};
 
 use crate::error::TapError;
 
@@ -37,7 +36,7 @@ use crate::error::TapError;
 #[allow(dead_code)]
 pub struct TransformEngine {
     engine: Engine,
-    store: Store<()>,
+    store: Store<HostState>,
     /// The instantiated Emscripten module handle — held alive so the WASM
     /// memory and exported functions remain accessible.
     #[allow(dead_code)]
@@ -77,14 +76,19 @@ impl TransformEngine {
         let module = Module::new(&engine, module_bytes.as_slice())
             .map_err(|e| TapError::Transform(format!("WASM compile: {e}")))?;
 
-        let mut store = Store::new(&engine, ());
+        let mut store = Store::new(
+            &engine,
+            HostState {
+                quickjs_memory: None,
+            },
+        );
 
         // Prevent the epoch mechanism from interrupting during instantiation.
         // We'll set a real deadline before each JS execution call.
         store.set_epoch_deadline(u64::MAX);
 
         // ── linker: provide host imports for the Emscripten module ────
-        let mut linker: Linker<()> = Linker::new(&engine);
+        let mut linker: Linker<HostState> = Linker::new(&engine);
         add_emscripten_stubs(&mut linker, &mut store)?;
 
         let instance = linker
@@ -106,29 +110,33 @@ impl Default for TransformEngine {
     }
 }
 
-/// Global memory handle for Emscripten host-function stubs that need
-/// to read / write linear memory but don't receive a [`Store`] from
-/// [`Func::wrap`].  The handle is set once during [`add_emscripten_stubs`]
-/// and is safe to access because wasmtime's store is single-threaded.
-static QUICKJS_MEMORY: OnceLock<wasmtime::Memory> = OnceLock::new();
+/// Per-engine host state carried inside the wasmtime [`Store`].
+///
+/// Holds the linear memory handle so host-function callbacks (which
+/// receive a [`Caller`]) can read/write the Emscripten heap without
+/// relying on a process-level [`OnceLock`].
+struct HostState {
+    /// Handle to the linear memory defined as import `"a"."a"`.
+    quickjs_memory: Option<Memory>,
+}
 
 /// Register minimal Emscripten stubs so the QuickJS module can
 /// instantiate.  Real implementations will be wired in follow-up work
 /// alongside the QuickJS FFI calls.
-fn add_emscripten_stubs(linker: &mut Linker<()>, store: &mut Store<()>) -> Result<(), TapError> {
+fn add_emscripten_stubs(
+    linker: &mut Linker<HostState>,
+    store: &mut Store<HostState>,
+) -> Result<(), TapError> {
     // ── a.a — linear memory ──────────────────────────────────────────
     //
     // The Emscripten module declares a 16 MB (256-page) memory, with an
-    // absolute cap of 2 GB (32768 pages).  A copy is stashed in
-    // [`QUICKJS_MEMORY`] so host-function stubs that need memory access
-    // (e.g. emscripten_memcpy) can reach it.
+    // absolute cap of 2 GB (32768 pages).  The handle is stashed in
+    // [`HostState`] so host-function stubs that need memory access
+    // (e.g. emscripten_memcpy) can reach it via [`Caller::data`].
     let mem_ty = wasmtime::MemoryType::new(256, Some(32768));
     let memory = wasmtime::Memory::new(&mut *store, mem_ty)
         .map_err(|e| TapError::Transform(format!("a.a memory: {e}")))?;
-    QUICKJS_MEMORY
-        .set(memory)
-        .map_err(|_| TapError::Transform("QUICKJS_MEMORY already set".into()))?;
-
+    store.data_mut().quickjs_memory = Some(memory);
     linker
         .define(&mut *store, "a", "a", memory)
         .map_err(|e| TapError::Transform(format!("a.a memory: {e}")))?;
@@ -161,12 +169,16 @@ fn add_emscripten_stubs(linker: &mut Linker<()>, store: &mut Store<()>) -> Resul
             [ValType::I32, ValType::I32, ValType::I32],
             [ValType::I32],
         ),
-        |mut caller: Caller<'_, ()>, args: &[Val], results: &mut [Val]| {
+        |mut caller: Caller<'_, HostState>, args: &[Val], results: &mut [Val]| {
             let dest = args[0].i32().unwrap_or(0) as usize;
             let src = args[1].i32().unwrap_or(0) as usize;
             let n = args[2].i32().unwrap_or(0) as usize;
             if n > 0 {
-                let mem = QUICKJS_MEMORY.get().expect("QUICKJS_MEMORY not set");
+                let mem = *caller
+                    .data()
+                    .quickjs_memory
+                    .as_ref()
+                    .expect("HostState.quickjs_memory not set in a.h stub");
                 let mut buf = vec![0u8; n];
                 mem.read(&caller, src, &mut buf)?;
                 mem.write(&mut caller, dest, &buf)?;
