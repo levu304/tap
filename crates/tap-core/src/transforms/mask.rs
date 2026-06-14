@@ -38,7 +38,7 @@ use crate::transforms::config::{MaskStrategy, TransformDescriptor, TransformResu
 /// 32 bytes for HMAC-SHA-256.  This is a fixed development key — replace
 /// with a configured secret in production deployments where the hash must
 /// be cryptographically opaque.
-const HMAC_DEFAULT_KEY: &[u8] = b"tap-mask-hmac-key-v0-32bytes!";
+const HMAC_DEFAULT_KEY: &[u8] = b"tap-mask-hmac-key-v0-32bytes!!!!";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -55,6 +55,8 @@ const HMAC_DEFAULT_KEY: &[u8] = b"tap-mask-hmac-key-v0-32bytes!";
 /// - [`TransformResult::Modified`] — at least one field was masked.
 /// - [`TransformResult::PassThrough`] — no matching fields found.
 /// - [`TransformResult::Error`] — `descriptor` is not a `Mask` variant.
+///
+/// Note: [`TransformResult::Dropped`] is not returned by `apply_mask`.
 pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> TransformResult {
     let (fields, strategy) = match descriptor {
         TransformDescriptor::Mask { fields, strategy } => (fields, strategy),
@@ -97,33 +99,27 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
 ///
 /// Returns `true` if a value was actually modified.
 fn traverse_and_mask(value: &mut serde_json::Value, path: &str, strategy: MaskStrategy) -> bool {
-    let segments: Vec<&str> = path.split('.').collect();
-    if segments.is_empty() {
-        return false;
-    }
-
+    let mut segments = path.split('.');
+    // Peel the leaf segment off the end; remaining segments are parents.
+    let leaf = segments.next_back();
     let mut current = value;
-    for (i, segment) in segments.iter().enumerate() {
-        if i == segments.len() - 1 {
-            // ── Leaf segment: apply the mask ──────────────────────────
-            return match current.get_mut(segment) {
-                Some(val) => {
-                    *val = mask_value(std::mem::take(val), strategy);
-                    true
-                }
-                None => false,
-            };
-        }
 
-        // ── Intermediate segment: descend one level ──────────────────
+    for segment in segments {
         current = match current.get_mut(segment) {
             Some(v @ serde_json::Value::Object(_)) => v,
             _ => return false, // missing or non-object parent → skip
         };
     }
 
-    // Unreachable for non-empty segments.
-    false
+    // SAFETY: `str::split` on any string returns at least one element,
+    // so `leaf` is always `Some`.
+    match leaf.and_then(|key| current.get_mut(key)) {
+        Some(val) => {
+            *val = mask_value(std::mem::take(val), strategy);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Produce the masked replacement for a single JSON value.
