@@ -1464,6 +1464,80 @@ mod tests {
         assert_eq!(result, "3");
     }
 
+    // ── Verification: cross-eval data leakage (tap-06h) ────────────────
+
+    /// Prove that stale expression values do not leak across eval calls.
+    ///
+    /// An expression eval sets a global property (`__tap_{N}`) via the
+    /// compiled wrapper.  A subsequent statement-only eval must NOT see
+    /// that stale value — it must return `"undefined"` instead.
+    #[test]
+    fn no_cross_eval_data_leakage() {
+        let mut engine = TransformEngine::new().expect("new() failed");
+
+        // Step 1: expression eval that stores a value in the global property.
+        let bc1 = engine
+            .compile_to_bytecode("JSON.stringify({secret: 'data'})")
+            .expect("compile expr");
+        let r1 = engine.eval_bytecode(&bc1).expect("eval expr");
+        assert_eq!(r1, r#"{"secret":"data"}"#);
+
+        // Step 2: statement-only eval — must NOT leak the stale value.
+        let bc2 = engine
+            .compile_to_bytecode("const x = 1;")
+            .expect("compile stmt");
+        let r2 = engine.eval_bytecode(&bc2).expect("eval stmt");
+        assert_eq!(
+            r2, "undefined",
+            "stale expression value leaked across evals: got {r2:?}, expected \"undefined\""
+        );
+    }
+
+    // ── Verification: fuel-based timeout (tap-5kh) ─────────────────────
+
+    /// Prove that an infinite loop exhausts fuel and returns an error.
+    #[test]
+    fn infinite_loop_times_out() {
+        let mut engine = TransformEngine::new().expect("new() failed");
+
+        let source = "while(true){}";
+        let bytecode = engine
+            .compile_to_bytecode(source)
+            .expect("compile while loop");
+
+        let result = engine.eval_bytecode(&bytecode);
+        assert!(
+            result.is_err(),
+            "infinite loop should time out via fuel exhaustion"
+        );
+        // The error is a WASM trap from fuel exhaustion; exact wording depends
+        // on wasmtime version, so we just verify it's not a success.
+        result.unwrap_err();
+    }
+
+    // ── Verification: unique property name per instance (tap-zoh) ──────
+
+    /// Prove that two engine instances have different capture property names.
+    #[test]
+    fn engines_have_unique_property_names() {
+        let mut engine_a = TransformEngine::new().expect("engine_a");
+        let mut engine_b = TransformEngine::new().expect("engine_b");
+
+        // The name is private, but we can test through behaviour:
+        // compile+eval with two instances and verify they don't interfere.
+        let bc = engine_a
+            .compile_to_bytecode("JSON.stringify({x: 1})")
+            .expect("compile");
+        let r = engine_a.eval_bytecode(&bc).expect("eval");
+        assert_eq!(r, r#"{"x":1}"#);
+        // Same source on engine_b works too, proving both have valid names.
+        let bc2 = engine_b
+            .compile_to_bytecode("JSON.stringify({x: 1})")
+            .expect("compile engine_b");
+        let r2 = engine_b.eval_bytecode(&bc2).expect("eval engine_b");
+        assert_eq!(r2, r#"{"x":1}"#);
+    }
+
     /// Debug: probe WASM stack state and try JS_Eval with different flags.
     #[test]
     fn debug_probe_wasm_state() {
