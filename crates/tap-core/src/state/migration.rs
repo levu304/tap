@@ -21,7 +21,9 @@ const LATEST_VERSION: i64 = 2;
 ///
 /// # Errors
 ///
-/// Returns [`TapError::Sqlite`] on any database error during migration.
+/// Returns [`TapError::MigrationFailed`] on DDL execution failure or
+/// unknown version, or [`TapError::Sqlite`] for transaction lifecycle /
+/// schema version write errors.
 pub fn migrate(conn: &mut Connection) -> Result<(), TapError> {
     let current = current_version(conn)?;
 
@@ -69,13 +71,17 @@ fn apply_migration(conn: &mut Connection, version: i64) -> Result<(), TapError> 
     let tx = conn.transaction()?;
     match version {
         1 => {
-            tx.execute_batch(MIGRATION_V1)?;
+            tx.execute_batch(MIGRATION_V1).map_err(|e| {
+                TapError::MigrationFailed(format!("schema migration v1 failed: {e}"))
+            })?;
         }
         2 => {
-            tx.execute_batch(MIGRATION_V2)?;
+            tx.execute_batch(MIGRATION_V2).map_err(|e| {
+                TapError::MigrationFailed(format!("schema migration v2 failed: {e}"))
+            })?;
         }
         _ => {
-            return Err(TapError::StateCorruption(format!(
+            return Err(TapError::MigrationFailed(format!(
                 "unknown migration version: {version}"
             )));
         }

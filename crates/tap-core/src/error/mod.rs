@@ -50,6 +50,10 @@ pub enum TapError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Error during SQLite schema migration (DDL execution or unknown version).
+    #[error("Migration failed: {0}")]
+    MigrationFailed(String),
+
     /// Error related to Postgres replication slot management.
     #[error("Replication slot error: {0}")]
     ReplicationSlot(String),

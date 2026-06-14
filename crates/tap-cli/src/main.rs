@@ -166,7 +166,7 @@ async fn run_command(cli: Cli) -> Result<(), TapError> {
 /// | 4    | I/O error                      |
 /// | 5    | Internal / data decode error   |
 /// | 6    | Replication slot error         |
-/// | 7    | State store corruption         |
+/// | 7    | State store / migration error  |
 /// | 8    | Fatal / unknown error          |
 fn exit_code_for_error(err: &TapError) -> u8 {
     match err {
@@ -178,7 +178,7 @@ fn exit_code_for_error(err: &TapError) -> u8 {
         TapError::ReplicationSlot(_) => 6,
         TapError::Io(_) => 4,
         TapError::Decode(_) | TapError::Snapshot(_) => 5,
-        TapError::Sqlite(_) | TapError::StateCorruption(_) => 7,
+        TapError::Sqlite(_) | TapError::StateCorruption(_) | TapError::MigrationFailed(_) => 7,
         TapError::Transform(_) => 8,
     }
 }
@@ -281,6 +281,10 @@ mod tests {
         assert_eq!(exit_code_for_error(&TapError::Decode("bad data".into())), 5);
         assert_eq!(
             exit_code_for_error(&TapError::StateCorruption("corrupt".into())),
+            7
+        );
+        assert_eq!(
+            exit_code_for_error(&TapError::MigrationFailed("migration".into())),
             7
         );
     }
