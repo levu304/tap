@@ -115,6 +115,7 @@ impl TransformEngine {
     pub fn new() -> Result<Self, TapError> {
         let mut config = wasmtime::Config::new();
         config.epoch_interruption(true);
+        config.consume_fuel(true);
         config.wasm_bulk_memory(true);
         config.wasm_reference_types(true);
         config.wasm_simd(true);
@@ -131,8 +132,14 @@ impl TransformEngine {
 
         let mut store = Store::new(&engine, ());
 
-        // Prevent epoch interruption during init.  The deadline is set
-        // before each JS execution call.
+        // Set generous initial fuel for startup (ctors, eval stubs, etc.).
+        // Per-call limits are set before every compile/eval entry.
+        store
+            .set_fuel(50_000_000)
+            .map_err(|e| TapError::Transform(format!("set_fuel init: {e}")))?;
+
+        // Set a generous epoch deadline (function-level concurrency safety).
+        // Per-call instruction limits are enforced via fuel metering.
         store.set_epoch_deadline(u64::MAX);
 
         // ── linker: WASM host-import stubs ────────────────────────────
@@ -210,7 +217,12 @@ impl TransformEngine {
     /// Returns [`TapError::Transform`] if the bytecode is invalid or
     /// execution throws.
     pub fn eval_bytecode(&mut self, bytecode: &[u8]) -> Result<String, TapError> {
-        // ── step 0: clear stale tap result from previous eval ───────
+        // ── step 0: set fuel limit for this call ─────────────────────
+        self.store
+            .set_fuel(10_000_000)
+            .map_err(|e| TapError::Transform(format!("set_fuel: {e}")))?;
+
+        // ── step 0a: clear stale tap result from previous eval ──────
         // Prevents cross-eval data leakage: without this, a previous
         // expression transform's result could leak into the next
         // statement-only transform.
@@ -465,6 +477,11 @@ impl TransformEngine {
     /// `MODULE | COMPILE_ONLY`, serialise to bytecode via `JS_WriteObject`,
     /// and return the raw bytecode `Vec<u8>`.
     fn do_compile(&mut self, source: &[u8]) -> Result<Vec<u8>, TapError> {
+        // ── step 0: set fuel limit for compilation ───────────────────
+        self.store
+            .set_fuel(5_000_000)
+            .map_err(|e| TapError::Transform(format!("set_fuel: {e}")))?;
+
         // ── step 1: write source + filename into WASM memory ────
         // NOTE: string_to_wasm_inner always appends a \0 guard byte because
         // QuickJS-ng's module parser reads one byte past input_len. Without
