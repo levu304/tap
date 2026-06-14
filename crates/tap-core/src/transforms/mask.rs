@@ -61,7 +61,7 @@ const _: () = assert!(!HMAC_DEFAULT_KEY.is_empty(), "HMAC key must not be empty"
 /// - [`TransformResult::Error`] — `descriptor` is not a `Mask` variant.
 ///
 /// Note: [`TransformResult::Dropped`] is not returned by `apply_mask`.
-pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> TransformResult {
+pub fn apply_mask(event: ChangeEvent, descriptor: &TransformDescriptor) -> TransformResult {
     let (fields, strategy) = match descriptor {
         TransformDescriptor::Mask { fields, strategy } => (fields, strategy),
         _ => {
@@ -74,6 +74,7 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
     }
 
     let mut modified = false;
+    let mut event = event;
 
     // Deduplicate field paths so the same field is never masked twice.
     // Under the Hash strategy a second pass would hash the already-hashed
@@ -100,7 +101,7 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
     }
 
     if modified {
-        TransformResult::Modified(Box::new(event.clone()))
+        TransformResult::Modified(Box::new(event))
     } else {
         TransformResult::PassThrough
     }
@@ -185,6 +186,15 @@ mod tests {
     use crate::event::{ChangeEvent, Operation, SourceMetadata};
     use crate::transforms::config::MaskStrategy;
 
+    /// Unwrap a [`TransformResult::Modified`], extracting the inner
+    /// [`ChangeEvent`] so callers can inspect masked fields.
+    fn expect_modified(result: TransformResult) -> ChangeEvent {
+        match result {
+            TransformResult::Modified(e) => *e,
+            other => panic!("expected Modified, got {other:?}"),
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────
 
     fn make_event(after: Option<serde_json::Value>) -> ChangeEvent {
@@ -214,10 +224,9 @@ mod tests {
 
     #[test]
     fn redact_top_level_string() {
-        let mut event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.get("email")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -226,10 +235,9 @@ mod tests {
 
     #[test]
     fn redact_top_level_number() {
-        let mut event = make_event(Some(serde_json::json!({"ssn": 123456789})));
+        let event = make_event(Some(serde_json::json!({"ssn": 123456789})));
         let desc = make_descriptor(vec!["ssn"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.get("ssn")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -238,12 +246,11 @@ mod tests {
 
     #[test]
     fn redact_nested_field() {
-        let mut event = make_event(Some(serde_json::json!({
+        let event = make_event(Some(serde_json::json!({
             "user": {"email": "bob@example.com", "name": "Bob"}
         })));
         let desc = make_descriptor(vec!["user.email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.pointer("/user/email")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -257,14 +264,13 @@ mod tests {
 
     #[test]
     fn redact_before_and_after() {
-        let mut event = ChangeEvent {
+        let event = ChangeEvent {
             before: Some(serde_json::json!({"email": "old@example.com"})),
             after: Some(serde_json::json!({"email": "new@example.com"})),
             ..make_event(None)
         };
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.before.as_ref().and_then(|v| v.get("email")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -279,15 +285,14 @@ mod tests {
     fn redact_delete_event_before_only() {
         // A delete event has `before: Some(...)` and `after: None`.
         // Masking must apply to the `before` value.
-        let mut event = ChangeEvent {
+        let event = ChangeEvent {
             op: Operation::Delete,
             before: Some(serde_json::json!({"email": "delete@example.com"})),
             after: None,
             ..make_event(None)
         };
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.before.as_ref().and_then(|v| v.get("email")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -298,10 +303,9 @@ mod tests {
 
     #[test]
     fn hash_top_level_string() {
-        let mut event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
         let desc = make_descriptor(vec!["email"], MaskStrategy::Hash);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         let masked = event.after.as_ref().and_then(|v| v.get("email"));
         assert!(masked.is_some());
         let hex_str = masked.unwrap().as_str().unwrap();
@@ -313,94 +317,60 @@ mod tests {
     #[test]
     fn hash_is_deterministic() {
         let json = serde_json::json!({"field": "hello"});
-
-        let mut event1 = make_event(Some(json.clone()));
         let desc = make_descriptor(vec!["field"], MaskStrategy::Hash);
-        let _ = apply_mask(&mut event1, &desc);
-        let h1 = event1
-            .after
-            .unwrap()
-            .get("field")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
 
-        let mut event2 = make_event(Some(json));
-        let _ = apply_mask(&mut event2, &desc);
-        let h2 = event2
-            .after
-            .unwrap()
-            .get("field")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
+        let e1 = expect_modified(apply_mask(make_event(Some(json.clone())), &desc));
+        let h1 = e1.after.unwrap()["field"].as_str().unwrap().to_string();
+
+        let e2 = expect_modified(apply_mask(make_event(Some(json)), &desc));
+        let h2 = e2.after.unwrap()["field"].as_str().unwrap().to_string();
 
         assert_eq!(h1, h2, "hash must be deterministic for same input");
     }
 
     #[test]
     fn duplicate_paths_dont_double_hash() {
-        // Listing the same field twice must not hash the already-hashed
-        // hex digest — the result must equal a single pass.
         let json = serde_json::json!({"field": "hello"});
 
-        // Single pass → reference hash.
-        let mut ref_event = make_event(Some(json.clone()));
-        let single_desc = make_descriptor(vec!["field"], MaskStrategy::Hash);
-        let _ = apply_mask(&mut ref_event, &single_desc);
-        let ref_hash = ref_event.after.unwrap()["field"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let e1 = expect_modified(apply_mask(
+            make_event(Some(json.clone())),
+            &make_descriptor(vec!["field"], MaskStrategy::Hash),
+        ));
+        let ref_hash = e1.after.unwrap()["field"].as_str().unwrap().to_string();
 
-        // Duplicate paths → must produce the same hash.
-        let mut dup_event = make_event(Some(json));
-        let dup_desc = make_descriptor(vec!["field", "field"], MaskStrategy::Hash);
-        let _ = apply_mask(&mut dup_event, &dup_desc);
-        let dup_hash = dup_event.after.unwrap()["field"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let e2 = expect_modified(apply_mask(
+            make_event(Some(json)),
+            &make_descriptor(vec!["field", "field"], MaskStrategy::Hash),
+        ));
+        let dup_hash = e2.after.unwrap()["field"].as_str().unwrap().to_string();
 
         assert_eq!(ref_hash, dup_hash, "duplicate paths must not double-hash");
     }
 
     #[test]
     fn hash_different_inputs_differ() {
-        let mut event1 = make_event(Some(serde_json::json!({"field": "alice"})));
         let desc = make_descriptor(vec!["field"], MaskStrategy::Hash);
-        let _ = apply_mask(&mut event1, &desc);
-        let h1 = event1
-            .after
-            .unwrap()
-            .get("field")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
 
-        let mut event2 = make_event(Some(serde_json::json!({"field": "bob"})));
-        let _ = apply_mask(&mut event2, &desc);
-        let h2 = event2
-            .after
-            .unwrap()
-            .get("field")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
+        let e1 = expect_modified(apply_mask(
+            make_event(Some(serde_json::json!({"field": "alice"}))),
+            &desc,
+        ));
+        let h1 = e1.after.unwrap()["field"].as_str().unwrap().to_string();
+
+        let e2 = expect_modified(apply_mask(
+            make_event(Some(serde_json::json!({"field": "bob"}))),
+            &desc,
+        ));
+        let h2 = e2.after.unwrap()["field"].as_str().unwrap().to_string();
 
         assert_ne!(h1, h2, "different inputs must produce different hashes");
     }
 
     #[test]
     fn hash_number_field() {
-        let mut event = make_event(Some(serde_json::json!({"id": 42})));
+        let event = make_event(Some(serde_json::json!({"id": 42})));
         let desc = make_descriptor(vec!["id"], MaskStrategy::Hash);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         let masked = event.after.as_ref().and_then(|v| v.get("id"));
         assert!(masked.unwrap().is_string());
         assert_eq!(masked.unwrap().as_str().unwrap().len(), 64);
@@ -408,9 +378,9 @@ mod tests {
 
     #[test]
     fn hash_boolean_field() {
-        let mut event = make_event(Some(serde_json::json!({"active": true})));
+        let event = make_event(Some(serde_json::json!({"active": true})));
         let desc = make_descriptor(vec!["active"], MaskStrategy::Hash);
-        apply_mask(&mut event, &desc);
+        let event = expect_modified(apply_mask(event, &desc));
         let masked = event.after.as_ref().and_then(|v| v.get("active"));
         assert!(masked.unwrap().is_string());
     }
@@ -419,10 +389,9 @@ mod tests {
 
     #[test]
     fn null_top_level_string() {
-        let mut event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "alice@example.com"})));
         let desc = make_descriptor(vec!["email"], MaskStrategy::Null);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.get("email")),
             Some(&serde_json::Value::Null)
@@ -431,11 +400,11 @@ mod tests {
 
     #[test]
     fn null_nested_field() {
-        let mut event = make_event(Some(serde_json::json!({
+        let event = make_event(Some(serde_json::json!({
             "user": {"ssn": "123-45-6789"}
         })));
         let desc = make_descriptor(vec!["user.ssn"], MaskStrategy::Null);
-        apply_mask(&mut event, &desc);
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.pointer("/user/ssn")),
             Some(&serde_json::Value::Null)
@@ -446,59 +415,59 @@ mod tests {
 
     #[test]
     fn non_mask_descriptor_returns_error() {
-        let mut event = make_event(Some(serde_json::json!({"x": 1})));
+        let event = make_event(Some(serde_json::json!({"x": 1})));
         let desc = TransformDescriptor::Filter {
             script: "() => true".into(),
         };
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert!(matches!(result, TransformResult::Error(_)));
     }
 
     #[test]
     fn empty_fields_passthrough() {
-        let mut event = make_event(Some(serde_json::json!({"x": 1})));
+        let event = make_event(Some(serde_json::json!({"x": 1})));
         let desc = make_descriptor(vec![], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn non_existent_field_passthrough() {
-        let mut event = make_event(Some(serde_json::json!({"x": 1})));
+        let event = make_event(Some(serde_json::json!({"x": 1})));
         let desc = make_descriptor(vec!["y"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn non_existent_nested_field_passthrough() {
-        let mut event = make_event(Some(serde_json::json!({"x": {"y": 1}})));
+        let event = make_event(Some(serde_json::json!({"x": {"y": 1}})));
         let desc = make_descriptor(vec!["x.z"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn missing_before_and_after_passthrough() {
-        let mut event = ChangeEvent {
+        let event = ChangeEvent {
             before: None,
             after: None,
             ..make_event(None)
         };
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn after_only_produces_modified() {
-        let mut event = ChangeEvent {
+        let event = ChangeEvent {
             before: None,
             after: Some(serde_json::json!({"email": "alice@example.com"})),
             ..make_event(None)
         };
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert!(matches!(result, TransformResult::Modified(_)));
     }
 
@@ -506,38 +475,39 @@ mod tests {
     fn empty_path_segment_skips_masking() {
         // A path with an empty segment (e.g., "user..email") must not mask
         // the field — the path is invalid and should silently pass through.
-        let mut event = make_event(Some(serde_json::json!({"user": {"email": "a@b.com"}})));
+        let event = make_event(Some(serde_json::json!({"user": {"email": "a@b.com"}})));
+        let before = event.clone();
         let desc = make_descriptor(vec!["user..email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
-        // The field must remain unmasked.
+        // The field must remain unmasked — clone is unchanged.
         assert_eq!(
-            event.after.as_ref().and_then(|v| v.pointer("/user/email")),
+            before.after.as_ref().and_then(|v| v.pointer("/user/email")),
             Some(&serde_json::json!("a@b.com"))
         );
     }
 
     #[test]
     fn leading_dot_path_skips_masking() {
-        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
         let desc = make_descriptor(vec![".email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn trailing_dot_path_skips_masking() {
-        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
         let desc = make_descriptor(vec!["email."], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn empty_path_skips_masking() {
-        let mut event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
+        let event = make_event(Some(serde_json::json!({"email": "a@b.com"})));
         let desc = make_descriptor(vec![""], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
@@ -545,24 +515,23 @@ mod tests {
     fn intermediate_is_array_skips_path() {
         // If an intermediate segment is an array (not an object), the
         // path is silently skipped rather than panicking.
-        let mut event = make_event(Some(serde_json::json!({
+        let event = make_event(Some(serde_json::json!({
             "items": [{"email": "a@b.com"}]
         })));
         let desc = make_descriptor(vec!["items.email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         assert_eq!(result, TransformResult::PassThrough);
     }
 
     #[test]
     fn multiple_fields_all_masked() {
-        let mut event = make_event(Some(serde_json::json!({
+        let event = make_event(Some(serde_json::json!({
             "email": "a@b.com",
             "phone": "555-0100",
             "name": "Alice"
         })));
         let desc = make_descriptor(vec!["email", "phone"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
-        assert!(matches!(result, TransformResult::Modified(_)));
+        let event = expect_modified(apply_mask(event, &desc));
         assert_eq!(
             event.after.as_ref().and_then(|v| v.get("email")),
             Some(&serde_json::json!("***REDACTED***"))
@@ -592,13 +561,13 @@ mod tests {
 
     #[test]
     fn mask_result_contains_original_event_fields() {
-        let mut event = make_event(Some(serde_json::json!({
+        let event = make_event(Some(serde_json::json!({
             "email": "a@b.com",
             "name": "Alice",
             "age": 30,
         })));
         let desc = make_descriptor(vec!["email"], MaskStrategy::Redact);
-        let result = apply_mask(&mut event, &desc);
+        let result = apply_mask(event, &desc);
         match result {
             TransformResult::Modified(ref e) => {
                 assert_eq!(e.id, "test-id");
