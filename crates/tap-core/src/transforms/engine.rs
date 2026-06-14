@@ -207,6 +207,12 @@ impl TransformEngine {
     /// Returns [`TapError::Transform`] if the bytecode is invalid or
     /// execution throws.
     pub fn eval_bytecode(&mut self, bytecode: &[u8]) -> Result<String, TapError> {
+        // ── step 0: clear stale tap result from previous eval ───────
+        // Prevents cross-eval data leakage: without this, a previous
+        // expression transform's result could leak into the next
+        // statement-only transform.
+        self.clear_tap_result()?;
+
         // ── step 1: write bytecode into WASM memory ──────────────────
         let (buf_ptr, buf_len) = self.string_to_wasm_inner(bytecode)?;
 
@@ -403,6 +409,38 @@ impl TransformEngine {
     }
 
     // ── Internal helpers ───────────────────────────────────────────
+
+    /// Clear the tap result global property to `undefined`.
+    ///
+    /// Uses `JS_Eval` with `JS_EVAL_TYPE_GLOBAL` to set the property.
+    /// This prevents stale expression values from leaking across
+    /// transform evaluations.
+    fn clear_tap_result(&mut self) -> Result<(), TapError> {
+        let clear_src = format!("globalThis.{}=undefined", self.tap_result_name);
+        let (src_ptr, src_len) = self.string_to_wasm_inner(clear_src.as_bytes())?;
+        let (name_ptr, _name_len) = self.string_to_wasm_inner(b"clear.js")?;
+        let val = call_export_5i32_1i64(
+            &self.instance,
+            &mut self.store,
+            "JS_Eval",
+            self.ctx,
+            src_ptr,
+            src_len,
+            name_ptr,
+            0, // JS_EVAL_TYPE_GLOBAL
+        )?;
+        call_export_1i32_void(&self.instance, &mut self.store, "free", src_ptr)?;
+        call_export_1i32_void(&self.instance, &mut self.store, "free", name_ptr)?;
+        // Free the return value (which is `undefined` for assignment).
+        call_export_2args_void(
+            &self.instance,
+            &mut self.store,
+            "JS_FreeValue",
+            self.ctx,
+            val,
+        )?;
+        Ok(())
+    }
 
     /// Compile source to bytecode (uncached).
     ///
