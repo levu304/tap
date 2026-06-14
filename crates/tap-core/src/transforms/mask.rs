@@ -147,7 +147,7 @@ fn traverse_and_mask(
     // so `leaf` is always `Some`.
     match leaf.and_then(|key| current.get_mut(key)) {
         Some(val) => {
-            *val = mask_value(std::mem::take(val), strategy)?;
+            *val = mask_value(val.clone(), strategy)?;
             Ok(true)
         }
         None => Ok(false),
