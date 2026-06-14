@@ -94,6 +94,8 @@ pub struct TransformEngine {
     bytecode_cache: HashMap<String, Vec<u8>>,
     /// QuickJS context handle (opaque pointer).
     ctx: i32,
+    /// QuickJS runtime handle (opaque pointer).
+    rt: i32,
     /// Unique property name on the global object for expression capture.
     ///
     /// Each engine instance uses a distinct name (e.g. `__tap_0`, `__tap_1`)
@@ -171,6 +173,7 @@ impl TransformEngine {
             memory,
             bytecode_cache: HashMap::new(),
             ctx,
+            rt,
             tap_result_name,
         })
     }
@@ -661,6 +664,10 @@ impl Drop for TransformEngine {
         if self.ctx != 0 {
             let _ =
                 call_export_1i32_void(&self.instance, &mut self.store, "JS_FreeContext", self.ctx);
+        }
+        if self.rt != 0 {
+            let _ =
+                call_export_1i32_void(&self.instance, &mut self.store, "JS_FreeRuntime", self.rt);
         }
     }
 }
