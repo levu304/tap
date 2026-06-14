@@ -15,6 +15,7 @@
 //! minimal stubs — see [`add_wasi_stubs`] and [`add_env_stubs`].
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use wasmtime::{Engine, Instance, Memory, Module, Store, Val};
 
@@ -23,6 +24,9 @@ use crate::error::TapError;
 // ---------------------------------------------------------------------------
 // QuickJS constants
 // ---------------------------------------------------------------------------
+
+/// Unique counter for the tap result property name.
+static TAP_RESULT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Evaluate as global code (the default, value 0).
 #[allow(dead_code)]
@@ -90,6 +94,11 @@ pub struct TransformEngine {
     bytecode_cache: HashMap<String, Vec<u8>>,
     /// QuickJS context handle (opaque pointer).
     ctx: i32,
+    /// Unique property name on the global object for expression capture.
+    ///
+    /// Each engine instance uses a distinct name (e.g. `__tap_0`, `__tap_1`)
+    /// so user scripts cannot accidentally clash with it.
+    tap_result_name: String,
 }
 
 impl TransformEngine {
@@ -152,6 +161,9 @@ impl TransformEngine {
             return Err(TapError::Transform("JS_NewContext returned null".into()));
         }
 
+        let counter = TAP_RESULT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tap_result_name = format!("__tap_{counter:x}");
+
         Ok(Self {
             engine,
             store,
@@ -159,6 +171,7 @@ impl TransformEngine {
             memory,
             bytecode_cache: HashMap::new(),
             ctx,
+            tap_result_name,
         })
     }
 
@@ -315,7 +328,7 @@ impl TransformEngine {
                 "JS_GetGlobalObject",
                 self.ctx,
             )?;
-            let prop_name = b"__tap_result";
+            let prop_name = self.tap_result_name.as_bytes();
             let (prop_ptr, _prop_len) = {
                 // Allocate len+1 for null terminator.
                 let len = prop_name.len() as i32;
@@ -404,7 +417,7 @@ impl TransformEngine {
         // Try wrapping source with result capture first.
         // Expression sources like `JSON.stringify(...)` compile fine; statement-
         // only sources like `const x = 1;` will fail the wrapper and fall back.
-        let wrapped_source = format!("globalThis.__tap_result={}", source);
+        let wrapped_source = format!("globalThis.{0}={1}", self.tap_result_name, source);
         if let Ok(bytecode) = self.do_compile(wrapped_source.as_bytes()) {
             return Ok(bytecode);
         }
