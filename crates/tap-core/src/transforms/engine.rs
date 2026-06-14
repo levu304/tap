@@ -246,19 +246,13 @@ impl TransformEngine {
         }
 
         // ── step 3: JS_EvalFunction(ctx, func_val) ───────────────────
+        // NOTE: JS_EvalFunction internally frees func_val for module-tag
+        // objects (confirmed in quickjs-ng quickjs.c:36291).  Do NOT call
+        // JS_FreeValue on func_val after this — that would be a double-free.
         let result = call_export_1i32_1i64_1i64(
             &self.instance,
             &mut self.store,
             "JS_EvalFunction",
-            self.ctx,
-            func_val,
-        )?;
-
-        // Free the function value (we don't need it after EvalFunction).
-        call_export_2args_void(
-            &self.instance,
-            &mut self.store,
-            "JS_FreeValue",
             self.ctx,
             func_val,
         )?;
