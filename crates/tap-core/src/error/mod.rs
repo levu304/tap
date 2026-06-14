@@ -82,4 +82,8 @@ pub enum TapError {
     /// Error during snapshot operations.
     #[error("Snapshot error: {0}")]
     Snapshot(String),
+
+    /// Error from the transform engine (wasmtime / QuickJS).
+    #[error("Transform engine error: {0}")]
+    Transform(String),
 }

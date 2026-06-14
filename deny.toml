@@ -12,9 +12,32 @@ feature-depth = 1
 ignore = [
     # RUSTSEC-2023-0071: memoffset is unmaintained, transitive via napi-rs on x86
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2024-0436: paste is unmaintained. Transitive via thiserror (v1).
+    # Upstream thiserror v2 doesn't use paste, but we have both v1 and v2 in
+    # the dependency tree. Will resolve when thiserror v1 is fully phased out.
+    "RUSTSEC-2024-0436",
     # RUSTSEC-2025-0020: PyString::from_object buffer overflow in pyo3.
     # Scaffold stubs don't call this API. Upgrade when v0.24+ is available.
     "RUSTSEC-2025-0020",
+    # RUSTSEC-2025-0057: fxhash is unmaintained. Transitive via napi-rs.
+    # Replaced by ahash/rustc-hash in most ecosystems; napi-rs tracks.
+    "RUSTSEC-2025-0057",
+    # RUSTSEC-2026-0086: wasmtime 64-bit table + Winch host data leakage.
+    # We use wasmtime's Cranelift compiler, not Winch. Not applicable.
+    "RUSTSEC-2026-0086",
+    # RUSTSEC-2026-0088: wasmtime pooling allocator data leakage.
+    # We don't use the pooling allocator — per-instance mmap. Not applicable.
+    "RUSTSEC-2026-0088",
+    # RUSTSEC-2026-0089: Winch `table.fill` host panic. N/A (Cranelift only).
+    "RUSTSEC-2026-0089",
+    # RUSTSEC-2026-0094: Winch `table.grow` return value. N/A (Cranelift only).
+    "RUSTSEC-2026-0094",
+    # RUSTSEC-2026-0095: Winch sandbox escape. N/A (Cranelift only).
+    "RUSTSEC-2026-0095",
+    # RUSTSEC-2026-0096: aarch64 Cranelift miscompiled guest heap access.
+    # Affects wasmtime < 25.0.1 on aarch64. We run CI on x86_64; macOS ARM
+    # dev machines not currently targeted. Upgrade to v25+ when available.
+    "RUSTSEC-2026-0096",
     # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained.
     # Transitive via mysql_async (mysql-common-derive). No safe upgrade available.
     "RUSTSEC-2026-0173",
