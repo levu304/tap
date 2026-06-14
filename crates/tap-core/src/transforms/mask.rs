@@ -71,7 +71,14 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
 
     let mut modified = false;
 
-    for field_path in fields {
+    // Deduplicate field paths so the same field is never masked twice.
+    // Under the Hash strategy a second pass would hash the already-hashed
+    // hex digest instead of the original value, producing incorrect results.
+    let mut unique_fields = fields.clone();
+    unique_fields.sort();
+    unique_fields.dedup();
+
+    for field_path in &unique_fields {
         if let Some(ref mut after) = event.after {
             if traverse_and_mask(after, field_path, *strategy) {
                 modified = true;
@@ -314,6 +321,33 @@ mod tests {
             .to_string();
 
         assert_eq!(h1, h2, "hash must be deterministic for same input");
+    }
+
+    #[test]
+    fn duplicate_paths_dont_double_hash() {
+        // Listing the same field twice must not hash the already-hashed
+        // hex digest — the result must equal a single pass.
+        let json = serde_json::json!({"field": "hello"});
+
+        // Single pass → reference hash.
+        let mut ref_event = make_event(Some(json.clone()));
+        let single_desc = make_descriptor(vec!["field"], MaskStrategy::Hash);
+        let _ = apply_mask(&mut ref_event, &single_desc);
+        let ref_hash = ref_event.after.unwrap()["field"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Duplicate paths → must produce the same hash.
+        let mut dup_event = make_event(Some(json));
+        let dup_desc = make_descriptor(vec!["field", "field"], MaskStrategy::Hash);
+        let _ = apply_mask(&mut dup_event, &dup_desc);
+        let dup_hash = dup_event.after.unwrap()["field"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(ref_hash, dup_hash, "duplicate paths must not double-hash");
     }
 
     #[test]
