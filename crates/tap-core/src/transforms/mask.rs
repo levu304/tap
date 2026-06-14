@@ -40,6 +40,10 @@ use crate::transforms::config::{MaskStrategy, TransformDescriptor, TransformResu
 /// be cryptographically opaque.
 const HMAC_DEFAULT_KEY: &[u8] = b"tap-mask-hmac-key-v0-32bytes!!!!";
 
+/// Compile-time assertion that [`HMAC_DEFAULT_KEY`] is non-empty.
+/// `Hmac::<Sha256>::new_from_slice` accepts any non-empty key length.
+const _: () = assert!(!HMAC_DEFAULT_KEY.is_empty(), "HMAC key must not be empty");
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -80,13 +84,17 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
 
     for field_path in &unique_fields {
         if let Some(ref mut after) = event.after {
-            if traverse_and_mask(after, field_path, *strategy) {
-                modified = true;
+            match traverse_and_mask(after, field_path, *strategy) {
+                Ok(true) => modified = true,
+                Ok(false) => {}
+                Err(e) => return TransformResult::Error(e.into()),
             }
         }
         if let Some(ref mut before) = event.before {
-            if traverse_and_mask(before, field_path, *strategy) {
-                modified = true;
+            match traverse_and_mask(before, field_path, *strategy) {
+                Ok(true) => modified = true,
+                Ok(false) => {}
+                Err(e) => return TransformResult::Error(e.into()),
             }
         }
     }
@@ -104,16 +112,22 @@ pub fn apply_mask(event: &mut ChangeEvent, descriptor: &TransformDescriptor) -> 
 
 /// Walk a dot-separated path into a JSON value tree and mask the leaf.
 ///
-/// Returns `true` if a value was actually modified.
+/// Returns `Ok(true)` if a value was modified, `Ok(false)` if no matching
+/// field was found, or `Err` if the masking operation itself failed (e.g.
+/// invalid HMAC key).
 ///
 /// If `path` contains empty segments (e.g. `"user..email"` or `".email"`)
-/// the function silently returns `false` — the path is invalid, so no
+/// the function silently returns `Ok(false)` — the path is invalid, so no
 /// value is modified.
-fn traverse_and_mask(value: &mut serde_json::Value, path: &str, strategy: MaskStrategy) -> bool {
+fn traverse_and_mask(
+    value: &mut serde_json::Value,
+    path: &str,
+    strategy: MaskStrategy,
+) -> Result<bool, &'static str> {
     // Reject paths with empty segments (leading/trailing dots, double
     // dots) so configuration typos don't silently skip masking.
     if path.is_empty() || path.split('.').any(|s| s.is_empty()) {
-        return false;
+        return Ok(false);
     }
 
     let mut segments = path.split('.');
@@ -124,7 +138,7 @@ fn traverse_and_mask(value: &mut serde_json::Value, path: &str, strategy: MaskSt
     for segment in segments {
         current = match current.get_mut(segment) {
             Some(v @ serde_json::Value::Object(_)) => v,
-            _ => return false, // missing or non-object parent → skip
+            _ => return Ok(false), // missing or non-object parent → skip
         };
     }
 
@@ -132,29 +146,32 @@ fn traverse_and_mask(value: &mut serde_json::Value, path: &str, strategy: MaskSt
     // so `leaf` is always `Some`.
     match leaf.and_then(|key| current.get_mut(key)) {
         Some(val) => {
-            *val = mask_value(std::mem::take(val), strategy);
-            true
+            *val = mask_value(std::mem::take(val), strategy)?;
+            Ok(true)
         }
-        None => false,
+        None => Ok(false),
     }
 }
 
 /// Produce the masked replacement for a single JSON value.
-fn mask_value(value: serde_json::Value, strategy: MaskStrategy) -> serde_json::Value {
+fn mask_value(
+    value: serde_json::Value,
+    strategy: MaskStrategy,
+) -> Result<serde_json::Value, &'static str> {
     match strategy {
-        MaskStrategy::Redact => serde_json::Value::String("***REDACTED***".into()),
+        MaskStrategy::Redact => Ok(serde_json::Value::String("***REDACTED***".into())),
         MaskStrategy::Hash => {
             let input: Vec<u8> = match &value {
                 serde_json::Value::String(s) => s.as_bytes().to_vec(),
                 other => other.to_string().into_bytes(),
             };
             let mut mac = Hmac::<Sha256>::new_from_slice(HMAC_DEFAULT_KEY)
-                .expect("HMAC default key is valid 32-byte key");
+                .map_err(|_| "invalid HMAC key length")?;
             mac.update(&input);
             let code = mac.finalize().into_bytes();
-            serde_json::Value::String(hex::encode(code))
+            Ok(serde_json::Value::String(hex::encode(code)))
         }
-        MaskStrategy::Null => serde_json::Value::Null,
+        MaskStrategy::Null => Ok(serde_json::Value::Null),
     }
 }
 
@@ -558,6 +575,16 @@ mod tests {
         assert_eq!(
             event.after.as_ref().and_then(|v| v.get("name")),
             Some(&serde_json::json!("Alice"))
+        );
+    }
+
+    #[test]
+    fn hmac_key_is_valid() {
+        // Verify the default HMAC key is accepted by Hmac::new_from_slice
+        // (any non-empty key is valid for HMAC-SHA-256).
+        assert!(
+            Hmac::<Sha256>::new_from_slice(HMAC_DEFAULT_KEY).is_ok(),
+            "HMAC_DEFAULT_KEY must be accepted by Hmac"
         );
     }
 
