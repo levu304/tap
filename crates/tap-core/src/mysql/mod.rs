@@ -27,4 +27,5 @@ pub mod snapshot;
 pub mod types;
 
 pub use events::MySqlChangeEvent;
+pub use snapshot::BinlogPosition;
 pub use types::ColumnInfo;

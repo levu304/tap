@@ -32,8 +32,24 @@ use tracing::{error, info, warn};
 use crate::config::{MySqlSourceConfig, SnapshotConfig};
 use crate::error::TapError;
 use crate::event::{ChangeEvent, Operation, SourceMetadata, builder::ChangeEventBuilder};
+use crate::snapshot::SnapshotResult;
 use crate::snapshot::chunker::{PkRange, SnapshotChunk, generate_chunks};
 use crate::snapshot::runner::TableInfo;
+
+/// MySQL binlog position used as the snapshot position marker.
+#[derive(Debug, Clone)]
+pub struct BinlogPosition {
+    /// Binlog file name (e.g. `"mysql-bin.000001"`).
+    pub file: String,
+    /// Byte offset within the binlog file.
+    pub offset: u64,
+}
+
+impl std::fmt::Display for BinlogPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file, self.offset)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -53,7 +69,7 @@ pub async fn run_mysql_parallel_snapshot(
     source_config: &MySqlSourceConfig,
     snap_config: &SnapshotConfig,
     event_tx: &UnboundedSender<ChangeEvent>,
-) -> Result<(String, u64), TapError> {
+) -> Result<SnapshotResult<BinlogPosition>, TapError> {
     // Build connection pool from source config.
     let pool_opts = source_config.opts();
     let pool = Pool::new(pool_opts);
@@ -278,14 +294,27 @@ pub async fn run_mysql_parallel_snapshot(
         )));
     }
 
+    let tables_snapshotted: Vec<String> = table_work_list
+        .iter()
+        .map(|tw| tw.table.qualified.clone())
+        .collect();
+
     info!(
         snapshot_id,
         total_rows,
-        tables = total_table_count,
+        tables = %tables_snapshotted.len(),
         "MySQL parallel snapshot completed successfully",
     );
 
-    Ok((snapshot_id, total_rows))
+    Ok(SnapshotResult {
+        snapshot_id,
+        position: BinlogPosition {
+            file: binlog_file,
+            offset: binlog_offset,
+        },
+        total_rows,
+        tables_snapshotted,
+    })
 }
 
 // ---------------------------------------------------------------------------

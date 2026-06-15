@@ -201,7 +201,7 @@ async fn run_snapshot_inner(
         info!("no tables to snapshot");
         return Ok(SnapshotResult {
             snapshot_id: run_id.to_string(),
-            lsn,
+            position: lsn,
             total_rows: 0,
             tables_snapshotted: Vec::new(),
         });
@@ -270,7 +270,7 @@ async fn run_snapshot_inner(
         };
         return Ok(SnapshotResult {
             snapshot_id: run_id.to_string(),
-            lsn,
+            position: lsn,
             total_rows,
             tables_snapshotted,
         });
@@ -373,7 +373,7 @@ async fn run_snapshot_inner(
 
     Ok(SnapshotResult {
         snapshot_id: run_id.to_string(),
-        lsn,
+        position: lsn,
         total_rows,
         tables_snapshotted,
     })
@@ -805,7 +805,7 @@ mod tests {
         let lsn = Lsn::from_u64(0x16B37428);
         let result = SnapshotResult {
             snapshot_id: "00000004-000004D8-1".into(),
-            lsn,
+            position: lsn,
             total_rows: 1000,
             tables_snapshotted: vec!["public.users".into(), "public.orders".into()],
         };
