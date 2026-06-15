@@ -73,12 +73,107 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         config.capture.from_lsn = Some(lsn.clone());
     }
 
+    // ── 2. MySQL capture path (early return) ──────────────────────────
+    if let Some(ref mysql_config) = config.mysql_source {
+        info!(
+            "Starting MySQL capture (db={}, tables={:?})",
+            mysql_config.dbname, config.snapshot.tables,
+        );
+
+        // For now only snapshot is supported — MySQL binlog streaming is
+        // deferred to a later phase.
+        if !args.snapshot && !config.capture.snapshot {
+            return Err(TapError::Config(
+                "MySQL capture requires --snapshot (binlog streaming not yet implemented)".into(),
+            ));
+        }
+
+        // SSE server
+        let sse = SseServer::new(config.sink.clone());
+        let port = sse.start().await?;
+        info!("SSE server listening on port {port}");
+
+        // Change event channel
+        let (change_tx, mut change_rx) = tokio::sync::mpsc::unbounded_channel::<ChangeEvent>();
+        let sse_broadcast = sse.broadcast().clone();
+        tokio::spawn(async move {
+            while let Some(ce) = change_rx.recv().await {
+                let event_data = match serde_json::to_value(&ce) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Failed to serialize ChangeEvent: {e}");
+                        continue;
+                    }
+                };
+                let sse_event = SseEvent::new(SseEventType::Change, event_data).with_id(&ce.id);
+                if sse_broadcast.send(sse_event).is_err() {
+                    // No active SSE listeners — fine
+                }
+            }
+        });
+
+        // Health
+        {
+            let mut health = sse.health_state().write().await;
+            health.state = tap_core::sse::CaptureState::Snapshot;
+        }
+
+        // Snapshot start SSE event
+        sse.broadcast()
+            .send(SseEvent::new(
+                SseEventType::SnapshotStart,
+                serde_json::json!({
+                    "tables": config.snapshot.tables,
+                    "batch_size": config.snapshot.batch_size,
+                }),
+            ))
+            .ok();
+
+        // Run MySQL parallel snapshot
+        let snapshot_result = tap_core::mysql::snapshot::run_mysql_parallel_snapshot(
+            mysql_config,
+            &config.snapshot,
+            &change_tx,
+        )
+        .await?;
+
+        info!(
+            "MySQL snapshot complete: {} rows in {} tables, binlog={}:{}",
+            snapshot_result.total_rows,
+            snapshot_result.tables_snapshotted.len(),
+            snapshot_result.position.file,
+            snapshot_result.position.offset,
+        );
+
+        // Snapshot complete SSE event
+        sse.broadcast()
+            .send(SseEvent::new(
+                SseEventType::SnapshotComplete,
+                serde_json::json!({
+                    "tables": snapshot_result.tables_snapshotted,
+                    "rows": snapshot_result.total_rows,
+                    "binlog": format!("{}:{}", snapshot_result.position.file, snapshot_result.position.offset),
+                }),
+            ))
+            .ok();
+
+        // Update health
+        {
+            let mut health = sse.health_state().write().await;
+            health.events_captured = snapshot_result.total_rows;
+            health.state = tap_core::sse::CaptureState::Streaming;
+        }
+
+        info!("MySQL capture snapshot complete — binlog streaming deferred");
+        return Ok(());
+    }
+
     info!(
         "Starting capture session (db={}, tables={:?})",
         config.source.dbname, config.source.tables,
     );
 
-    // ── 2. Connect to Postgres (replication) ─────────────────────────
+    // ── 3. Connect to Postgres (replication) ─────────────────────────
     let pg = PgConnection::connect(&config.source).await?;
     info!("Connected to Postgres (replication mode)");
 
@@ -209,13 +304,13 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         };
 
         // Update start_lsn so replication resumes from snapshot position
-        start_lsn = Some(snapshot_result.lsn);
+        start_lsn = Some(snapshot_result.position);
 
         info!(
             "Snapshot complete: {} rows in {} tables, LSN={}",
             snapshot_result.total_rows,
             snapshot_result.tables_snapshotted.len(),
-            snapshot_result.lsn,
+            snapshot_result.position,
         );
 
         // Send SnapshotComplete SSE event
@@ -225,7 +320,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
                 serde_json::json!({
                     "tables": snapshot_result.tables_snapshotted,
                     "rows": snapshot_result.total_rows,
-                    "lsn": snapshot_result.lsn.to_string(),
+                    "lsn": snapshot_result.position.to_string(),
                 }),
             ))
             .ok();
@@ -234,7 +329,7 @@ pub async fn run(args: CaptureArgs) -> Result<(), TapError> {
         {
             let mut health = sse.health_state().write().await;
             health.events_captured = snapshot_result.total_rows;
-            health.current_lsn = snapshot_result.lsn.to_string();
+            health.current_lsn = snapshot_result.position.to_string();
             health.state = tap_core::sse::CaptureState::Streaming;
         }
     } else {

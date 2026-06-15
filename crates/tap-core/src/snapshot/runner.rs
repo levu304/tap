@@ -31,12 +31,17 @@ use crate::state::StateStore;
 // ---------------------------------------------------------------------------
 
 /// Summary of a completed snapshot run.
+///
+/// Generic over the source position type `P` so both Postgres (`Lsn`) and
+/// MySQL (`BinlogPosition`) can use the same result struct.
+/// Defaults to [`Lsn`] so existing Postgres callers need no changes.
 #[derive(Debug, Clone)]
-pub struct SnapshotResult {
-    /// Snapshot identifier returned by `pg_export_snapshot()`.
+pub struct SnapshotResult<P = Lsn> {
+    /// Snapshot identifier (exported snapshot ID for Postgres,
+    /// `"{binlog_file}:{binlog_offset}"` for MySQL).
     pub snapshot_id: String,
-    /// WAL position at the moment the snapshot was exported.
-    pub lsn: Lsn,
+    /// Source position at the moment the snapshot was taken.
+    pub position: P,
     /// Total number of rows scanned across all tables.
     pub total_rows: u64,
     /// Qualified names of the tables that were snapshotted.
@@ -367,7 +372,7 @@ impl SnapshotRunner {
             info!("no tables to snapshot");
             return Ok(SnapshotResult {
                 snapshot_id,
-                lsn,
+                position: lsn,
                 total_rows: 0,
                 tables_snapshotted: Vec::new(),
             });
@@ -392,7 +397,7 @@ impl SnapshotRunner {
 
         Ok(SnapshotResult {
             snapshot_id,
-            lsn,
+            position: lsn,
             total_rows,
             tables_snapshotted,
         })
@@ -902,14 +907,14 @@ mod tests {
         let lsn = Lsn::from_u64(0x16B37428);
         let result = SnapshotResult {
             snapshot_id: "00000004-000004D8-1".into(),
-            lsn,
+            position: lsn,
             total_rows: 1000,
             tables_snapshotted: vec!["public.users".into(), "public.orders".into()],
         };
 
         assert_eq!(result.total_rows, 1000);
         assert_eq!(result.tables_snapshotted.len(), 2);
-        assert_eq!(result.lsn, lsn);
+        assert_eq!(result.position, lsn);
     }
 
     // ── Empty tables list edge case ─────────────────────────────────

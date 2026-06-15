@@ -19,12 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mysql_async::prelude::Queryable;
 use testcontainers::{Container, GenericImage, clients::Cli, core::WaitFor};
 use tokio::sync::Mutex as AsyncMutex;
 
 // Re-use the library's engine types so we can exercise them against a real
 // Postgres (or the TAP_TEST_DB CI database).
-use tap_core::config::{SnapshotConfig, SourceConfig, StateConfig};
+use tap_core::config::{MySqlSourceConfig, SnapshotConfig, SourceConfig, StateConfig};
+use tap_core::mysql::snapshot::run_mysql_parallel_snapshot;
 use tap_core::postgres::{self, Lsn, PgConnection};
 use tap_core::snapshot::SnapshotRunner;
 use tap_core::snapshot::parallel::run_parallel_snapshot;
@@ -1181,4 +1183,221 @@ fn psql_db_name(conn_str: &str) -> String {
     let (_host_port, dbname) = rest.split_once('/').unwrap_or((rest, "tap_test"));
     // Strip any query parameters
     dbname.split('?').next().unwrap_or(dbname).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// MySQL parallel snapshot (requires MySQL container)
+// ---------------------------------------------------------------------------
+
+/// MySQL image to use for integration tests.
+const MYSQL_IMAGE: &str = "mysql";
+const MYSQL_TAG: &str = "8.0";
+
+/// Async mutex to serialise MySQL integration tests against the shared container.
+static MYSQL_MUTEX: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+/// Acquire the MySQL serialisation lock.
+async fn mysql_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    MYSQL_MUTEX.get_or_init(|| AsyncMutex::new(())).lock().await
+}
+
+/// A running MySQL 8.0 container with binary logging enabled.
+struct TestMysql {
+    #[allow(dead_code)]
+    container: Container<'static, GenericImage>,
+    port: u16,
+}
+
+impl TestMysql {
+    fn start() -> Self {
+        let _lock = DOCKER_LOCK.lock().expect("docker lock");
+
+        let mysql_args: Vec<String> = vec![
+            "--log-bin=mysql-bin".into(),
+            "--binlog-format=ROW".into(),
+            "--server-id=1".into(),
+            "--binlog-row-image=FULL".into(),
+        ];
+
+        let container = docker().run((
+            GenericImage::new(MYSQL_IMAGE, MYSQL_TAG)
+                .with_env_var("MYSQL_ROOT_PASSWORD", "tap_test")
+                .with_env_var("MYSQL_DATABASE", "tap_test")
+                .with_wait_for(WaitFor::message_on_stderr("ready for connections")),
+            mysql_args,
+        ));
+
+        Self {
+            port: container.get_host_port_ipv4(3306),
+            container,
+        }
+    }
+
+    fn source_config(&self) -> MySqlSourceConfig {
+        MySqlSourceConfig {
+            host: "127.0.0.1".into(),
+            port: self.port,
+            dbname: "tap_test".into(),
+            user: "root".into(),
+            password: "tap_test".into(),
+            tables: Vec::new(),
+            server_id: 42,
+            binlog_file: None,
+            binlog_offset: None,
+            binlog_retention_warning_threshold: 0,
+        }
+    }
+
+    /// Wait for MySQL to accept connections (with retry loop).
+    async fn wait_for_ready(&self) {
+        let opts = self.source_config().opts();
+        let pool = mysql_async::Pool::new(opts);
+        for attempt in 1..=30 {
+            match pool.get_conn().await {
+                Ok(conn) => {
+                    drop(conn);
+                    pool.disconnect().await.ok();
+                    return;
+                }
+                Err(e) => {
+                    if attempt == 30 {
+                        panic!("MySQL not ready after 30 retries: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                }
+            }
+        }
+    }
+
+    /// Create a test table with some sample data.
+    async fn create_test_table(&self, table_name: &str) {
+        self.wait_for_ready().await;
+        let opts = self.source_config().opts();
+        let pool = mysql_async::Pool::new(opts);
+        let mut conn = pool.get_conn().await.expect("connect to mysql");
+        conn.query_drop(format!(
+            "CREATE TABLE {table_name} (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(50) NOT NULL,
+                value BIGINT NOT NULL DEFAULT 0
+            )"
+        ))
+        .await
+        .expect("create table");
+        drop(conn);
+        pool.disconnect().await.expect("disconnect pool");
+    }
+
+    /// Insert sample rows into a test table using parameterised queries.
+    async fn insert_rows(&self, table_name: &str, rows: &[(&str, i64)]) {
+        let opts = self.source_config().opts();
+        let pool = mysql_async::Pool::new(opts);
+        let mut conn = pool.get_conn().await.expect("connect to mysql");
+        for &(name, value) in rows {
+            conn.exec_drop(
+                format!("INSERT INTO {table_name} (name, value) VALUES (?, ?)"),
+                (name, value),
+            )
+            .await
+            .expect("insert row");
+        }
+        drop(conn);
+        pool.disconnect().await.expect("disconnect pool");
+    }
+}
+
+/// Test that the MySQL parallel snapshot captures pre-existing rows.
+#[tokio::test]
+async fn test_mysql_parallel_snapshot_captures_rows() {
+    let _mysql = mysql_lock().await;
+    let mysql = TestMysql::start();
+    let table = test_name("t_par_snap");
+
+    mysql.create_test_table(&table).await;
+
+    // Pre-populate 12 rows
+    mysql
+        .insert_rows(
+            &table,
+            &[
+                ("alpha", 100),
+                ("bravo", 200),
+                ("charlie", 300),
+                ("delta", 400),
+                ("echo", 500),
+                ("foxtrot", 600),
+                ("golf", 700),
+                ("hotel", 800),
+                ("india", 900),
+                ("juliet", 1000),
+                ("kilo", 1100),
+                ("lima", 1200),
+            ],
+        )
+        .await;
+
+    let source_cfg = mysql.source_config();
+    let snap_config = SnapshotConfig {
+        tables: vec![format!("tap_test.{table}")],
+        num_workers: 4,
+        batch_size: 100,
+        ..Default::default()
+    };
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tap_core::event::ChangeEvent>();
+
+    let result = run_mysql_parallel_snapshot(&source_cfg, &snap_config, &event_tx)
+        .await
+        .expect("MySQL parallel snapshot should succeed");
+
+    // Verify snapshot result
+    assert_eq!(result.total_rows, 12, "should have snapshotted 12 rows");
+    assert!(
+        !result.tables_snapshotted.is_empty(),
+        "should have at least one table"
+    );
+    assert!(!result.snapshot_id.is_empty(), "should have a snapshot ID");
+
+    // Collect events
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+
+    assert_eq!(events.len(), 12, "should have 12 Read events");
+
+    // Verify each event is a Read operation with snapshot=true
+    for event in &events {
+        assert_eq!(
+            event.op,
+            tap_core::event::Operation::Read,
+            "MySQL snapshot events should be Read operations"
+        );
+        assert!(
+            event.source.snapshot == Some(true),
+            "MySQL snapshot events should have snapshot=true"
+        );
+    }
+
+    // Verify all expected names are present (order is not guaranteed with
+    // concurrent workers across chunked primary-key ranges in MySQL).
+    let mut names: Vec<&str> = events
+        .iter()
+        .map(|e| {
+            e.after
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima"
+        ],
+        "all 12 names should be present"
+    );
 }
