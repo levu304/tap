@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use wasmtime::{Engine, Instance, Memory, Module, Store, Val};
 
 use crate::error::TapError;
+use crate::event::ChangeEvent;
 
 // ---------------------------------------------------------------------------
 // QuickJS constants
@@ -666,6 +667,52 @@ impl TransformEngine {
             exc_val,
         )?;
         Ok(msg)
+    }
+    /// Run a JavaScript transform function against a CDC event.
+    ///
+    /// Compiles a JS module that defines the user's function `f`, embeds the
+    /// serialised event as a JSON literal, calls `f(event)`, serialises the
+    /// result back to JSON, and captures it via the tap result property so
+    /// [`eval_bytecode`](Self::eval_bytecode) can retrieve it.
+    ///
+    /// # Convention
+    ///
+    /// The `function_body` MUST define a function named `f` that accepts one
+    /// argument (the deserialised `ChangeEvent`) and returns a value whose
+    /// `JSON.stringify` representation is suitable for the caller.  For filter
+    /// transforms the return value should be a boolean; for map transforms it
+    /// should be the (possibly modified) event object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TapError::Transform`] if compilation fails, execution throws,
+    /// or the event cannot be serialised.
+    #[allow(dead_code)]
+    pub(crate) fn run_transform_js(
+        &mut self,
+        function_body: &str,
+        event: &ChangeEvent,
+    ) -> Result<String, TapError> {
+        // Serialise the event to JSON and escape for embedding in a single-quoted
+        // JS string literal: \ → \\, ' → \'.
+        let event_json = serde_json::to_string(event)
+            .map_err(|e| TapError::Transform(format!("serialize event: {e}")))?;
+        let escaped = event_json.replace('\\', "\\\\").replace('\'', "\\'");
+
+        // Build the full module: user function + event injection + result capture.
+        // The module defines f, parses the event from JSON, calls f, stringifies
+        // the result, and stores it on the tap result global property.
+        let script = format!(
+            "{}\nglobalThis.{} = JSON.stringify(f(JSON.parse('{}')));",
+            function_body, self.tap_result_name, escaped,
+        );
+
+        // Compile raw (no expression wrapper — the module itself handles
+        // result capture via `globalThis.{name} = ...`).
+        let bytecode = self.do_compile(script.as_bytes())?;
+
+        // Eval the bytecode — will find the result on the global property.
+        self.eval_bytecode(&bytecode)
     }
 }
 
