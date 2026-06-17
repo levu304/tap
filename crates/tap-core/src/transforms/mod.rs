@@ -14,5 +14,7 @@
 
 pub mod config;
 pub mod engine;
+pub mod filter;
+pub mod map;
 pub mod mask;
 pub mod validate;
