@@ -91,18 +91,18 @@ pub const TRANSFORM_TIMEOUT_MS: u64 = 100;
 /// # Errors
 ///
 /// Returns an error description if any check fails.
-pub fn validate_event_envelope(event: &ChangeEvent) -> Result<(), String> {
+pub fn validate_event_envelope(event: &ChangeEvent) -> Result<(), TapError> {
     if event.id.is_empty() {
-        return Err("event id is empty".into());
+        return Err(TapError::Decode("event id is empty".into()));
     }
     if event.source.db.is_empty() {
-        return Err("source.db is empty".into());
+        return Err(TapError::Decode("source.db is empty".into()));
     }
     if event.source.schema.is_empty() {
-        return Err("source.schema is empty".into());
+        return Err(TapError::Decode("source.schema is empty".into()));
     }
     if event.source.table.is_empty() {
-        return Err("source.table is empty".into());
+        return Err(TapError::Decode("source.table is empty".into()));
     }
     Ok(())
 }
@@ -144,7 +144,12 @@ pub fn route_transform_result(
             }
         }
         // Non-error results pass through as-is.
-        _ => result,
+        // #ForwardCompat: when adding a new TransformDescriptor variant, the
+        // compiler will flag this match as non-exhaustive, forcing an explicit
+        // routing decision for Error + the new variant.
+        (TransformResult::PassThrough, _) => TransformResult::PassThrough,
+        (TransformResult::Dropped, _) => TransformResult::Dropped,
+        (TransformResult::Modified(_), _) => result,
     }
 }
 
@@ -231,7 +236,8 @@ mod tests {
         let mut event = minimal_event();
         event.id.clear();
         let err = validate_event_envelope(&event).unwrap_err();
-        assert!(err.contains("id"), "error should mention id: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("id"), "error should mention id: {msg}");
     }
 
     #[test]
@@ -239,7 +245,8 @@ mod tests {
         let mut event = minimal_event();
         event.source.db.clear();
         let err = validate_event_envelope(&event).unwrap_err();
-        assert!(err.contains("source.db"), "error: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("source.db"), "error: {msg}");
     }
 
     #[test]
@@ -247,7 +254,8 @@ mod tests {
         let mut event = minimal_event();
         event.source.schema.clear();
         let err = validate_event_envelope(&event).unwrap_err();
-        assert!(err.contains("source.schema"), "error: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("source.schema"), "error: {msg}");
     }
 
     #[test]
@@ -255,7 +263,8 @@ mod tests {
         let mut event = minimal_event();
         event.source.table.clear();
         let err = validate_event_envelope(&event).unwrap_err();
-        assert!(err.contains("source.table"), "error: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("source.table"), "error: {msg}");
     }
 
     // ── Error routing ───────────────────────────────────────────────────

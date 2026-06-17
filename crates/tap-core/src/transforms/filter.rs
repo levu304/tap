@@ -326,6 +326,55 @@ mod tests {
         assert_eq!(result, TransformResult::Dropped);
     }
 
+    /// Reproduce the non-deterministic failure: sequential independent engines.
+    #[test]
+    fn sequential_engines_different_bodies() {
+        let bodies_and_events: Vec<(&str, ChangeEvent, TransformResult)> = vec![
+            (
+                "function f(e) { return true; }",
+                make_event(Some(serde_json::json!({"id": 1})), Operation::Create),
+                TransformResult::PassThrough,
+            ),
+            (
+                "function f(e) { return false; }",
+                make_event(Some(serde_json::json!({"id": 2})), Operation::Create),
+                TransformResult::Dropped,
+            ),
+            (
+                "function f(e) { return e.op === 'u'; }",
+                make_update_event(
+                    Some(serde_json::json!({"id": 3})),
+                    Some(serde_json::json!({"id": 3})),
+                ),
+                TransformResult::PassThrough,
+            ),
+            (
+                "function f(e) { return e.before === undefined; }",
+                ChangeEvent {
+                    op: Operation::Create,
+                    before: None,
+                    after: Some(serde_json::json!({"id": 4})),
+                    source: SourceMetadata {
+                        db: "t".into(),
+                        ..Default::default()
+                    },
+                    ts_ms: 0,
+                    id: "t4".into(),
+                },
+                TransformResult::PassThrough,
+            ),
+        ];
+
+        for (i, (body, event, expected)) in bodies_and_events.into_iter().enumerate() {
+            let mut engine = TransformEngine::new().unwrap_or_else(|e| panic!("engine[{i}]: {e}"));
+            let desc = make_filter(body);
+            let result = apply_filter(event, &mut engine, &desc);
+            assert_eq!(result, expected, "engine[{i}] body={body:?}");
+            // Drop engine explicitly.
+            drop(engine);
+        }
+    }
+
     /// Multiple filter evaluations on the same engine do not leak state.
     #[test]
     fn no_cross_eval_state_leakage() {

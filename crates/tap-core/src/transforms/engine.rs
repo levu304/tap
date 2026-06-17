@@ -14,7 +14,7 @@
 //! functions (5 from `env`, 2 from `wasi_snapshot_preview1`) provided as
 //! minimal stubs — see [`add_wasi_stubs`] and [`add_env_stubs`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use wasmtime::{Engine, Instance, Memory, Module, Store, Val};
@@ -81,8 +81,8 @@ const DEFAULT_FILENAME: &str = "input.js";
 /// call into QuickJS increments a per-engine epoch counter; the WASM
 /// module polls the counter on every back-edge and traps when the
 /// configured deadline elapses.
-#[allow(dead_code)]
 pub struct TransformEngine {
+    #[allow(dead_code)]
     engine: Engine,
     store: Store<()>,
     /// The instantiated WASM module — held alive so exported functions
@@ -91,7 +91,6 @@ pub struct TransformEngine {
     /// Handle to the exported linear memory.
     memory: Memory,
     /// Cache of compiled bytecode keyed by SHA-256 source hash (hex).
-    #[allow(dead_code)]
     bytecode_cache: HashMap<String, Vec<u8>>,
     /// QuickJS context handle (opaque pointer).
     ctx: i32,
@@ -102,6 +101,16 @@ pub struct TransformEngine {
     /// Each engine instance uses a distinct name (e.g. `__tap_0`, `__tap_1`)
     /// so user scripts cannot accidentally clash with it.
     tap_result_name: String,
+    /// Tracks which function body hashes have already been loaded onto the
+    /// global QuickJS scope so subsequent calls with the same body reuse the
+    /// cached bytecode instead of re-compiling.
+    loaded_fn_hashes: HashSet<String>,
+    /// True when the most recent bytecode uses the wrapper pattern
+    /// (`globalThis.__tap_N=<expr>`) that will set a value on `__tap_N` at
+    /// eval time.  Step 6 of `eval_bytecode` reads this flag to decide
+    /// whether to read from `__tap_N` or fall through to the module Promise
+    /// result.  Reset to `false` after the result is consumed.
+    has_tap_result: bool,
 }
 
 impl TransformEngine {
@@ -183,6 +192,8 @@ impl TransformEngine {
             ctx,
             rt,
             tap_result_name,
+            loaded_fn_hashes: HashSet::new(),
+            has_tap_result: false,
         })
     }
 
@@ -222,12 +233,6 @@ impl TransformEngine {
         self.store
             .set_fuel(10_000_000)
             .map_err(|e| TapError::Transform(format!("set_fuel: {e}")))?;
-
-        // ── step 0a: clear stale tap result from previous eval ──────
-        // Prevents cross-eval data leakage: without this, a previous
-        // expression transform's result could leak into the next
-        // statement-only transform.
-        self.clear_tap_result()?;
 
         // ── step 1: write bytecode into WASM memory ──────────────────
         let (buf_ptr, buf_len) = self.string_to_wasm_inner(bytecode)?;
@@ -377,7 +382,7 @@ impl TransformEngine {
                 global_obj,
             )?;
 
-            if !is_undefined(tap_result) && !is_exception(tap_result) {
+            if self.has_tap_result && !is_exception(tap_result) {
                 // The wrapped source stored an expression value — use it.
                 call_export_2args_void(
                     &self.instance,
@@ -415,19 +420,28 @@ impl TransformEngine {
             output_val,
         )?;
 
+        // ── step 8: clear stale tap result for next call ────────────
+        // Reset the has_tap_result flag — the result has been consumed.
+        self.has_tap_result = false;
+        // Best-effort JS-scope cleanup: evaluate `void 0;`.  This does NOT
+        // touch global properties, unlike the previous approach of
+        // `globalThis.__tap_N=undefined` which was corrupting __tap_f
+        // (QuickJS-ng WASM memory issue, see tap-31v).
+        let _ = self.clear_tap_result();
+
         Ok(result_str)
     }
 
     // ── Internal helpers ───────────────────────────────────────────
 
-    /// Clear the tap result global property to `undefined`.
-    ///
-    /// Uses `JS_Eval` with `JS_EVAL_TYPE_GLOBAL` to set the property.
-    /// This prevents stale expression values from leaking across
-    /// transform evaluations.
+    /// Debug: evaluate JS to check `globalThis.__tap_f`, print result.
+    /// Best-effort JS-scope cleanup at the end of `eval_bytecode`.
+    /// Evaluates `void 0;` — the actual stale-leak prevention uses the
+    /// Rust-side `has_tap_result` flag instead (avoids corrupting
+    /// `__tap_f` with JS_Eval assignment, see tap-31v).
     fn clear_tap_result(&mut self) -> Result<(), TapError> {
-        let clear_src = format!("globalThis.{}=undefined", self.tap_result_name);
-        let (src_ptr, src_len) = self.string_to_wasm_inner(clear_src.as_bytes())?;
+        let void_src = b"void 0;";
+        let (src_ptr, src_len) = self.string_to_wasm_inner(void_src)?;
         let (name_ptr, _name_len) = self.string_to_wasm_inner(b"clear.js")?;
         let val = call_export_5i32_1i64(
             &self.instance,
@@ -437,11 +451,10 @@ impl TransformEngine {
             src_ptr,
             src_len,
             name_ptr,
-            0, // JS_EVAL_TYPE_GLOBAL
+            0,
         )?;
         call_export_1i32_void(&self.instance, &mut self.store, "free", src_ptr)?;
         call_export_1i32_void(&self.instance, &mut self.store, "free", name_ptr)?;
-        // Free the return value (which is `undefined` for assignment).
         call_export_2args_void(
             &self.instance,
             &mut self.store,
@@ -467,10 +480,12 @@ impl TransformEngine {
         // only sources like `const x = 1;` will fail the wrapper and fall back.
         let wrapped_source = format!("globalThis.{0}={1}", self.tap_result_name, source);
         if let Ok(bytecode) = self.do_compile(wrapped_source.as_bytes()) {
+            self.has_tap_result = true;
             return Ok(bytecode);
         }
 
         // Fallback: compile with no wrapper (statements, throw, etc.).
+        self.has_tap_result = false;
         self.do_compile(source.as_bytes())
     }
 
@@ -670,10 +685,16 @@ impl TransformEngine {
     }
     /// Run a JavaScript transform function against a CDC event.
     ///
-    /// Compiles a JS module that defines the user's function `f`, embeds the
-    /// serialised event as a JSON literal, calls `f(event)`, serialises the
-    /// result back to JSON, and captures it via the tap result property so
-    /// [`eval_bytecode`](Self::eval_bytecode) can retrieve it.
+    /// The function body is compiled + evaluated once (cached by SHA-256 hash
+    /// on [`bytecode_cache`](Self::bytecode_cache)) and the result function `f`
+    /// is stored on the QuickJS global scope as `globalThis.__tap_f`.
+    /// Subsequent calls with the same `function_body` skip recompilation.
+    ///
+    /// Per-event execution compiles a tiny wrapper expression that calls
+    /// the cached `__tap_f` with the serialised event JSON.  The wrapper is
+    /// compiled via [`compile_to_bytecode`](Self::compile_to_bytecode) so the
+    /// function body itself benefits from cache hits even though the per-event
+    /// wrapper changes with every event.
     ///
     /// # Convention
     ///
@@ -687,31 +708,54 @@ impl TransformEngine {
     ///
     /// Returns [`TapError::Transform`] if compilation fails, execution throws,
     /// or the event cannot be serialised.
-    #[allow(dead_code)]
     pub(crate) fn run_transform_js(
         &mut self,
         function_body: &str,
         event: &ChangeEvent,
     ) -> Result<String, TapError> {
+        // ── Phase 1: load function body onto global scope (once) ──────────
+        let body_hash = hex_hash(function_body.as_bytes());
+        let is_first_load = !self.loaded_fn_hashes.contains(&body_hash);
+        if is_first_load {
+            // Note: we use do_compile + manual cache instead of
+            // compile_to_bytecode because the latter's expression wrapper in
+            // compile_to_bytecode_inner wraps `function f(e) { ... }` after an
+            // `=` sign, turning the declaration into a function expression.
+            // That makes `f` invisible to `globalThis.__tap_f = f`.
+            let setup = format!("{}\nglobalThis.__tap_f = f;", function_body);
+            let bytecode = self.do_compile(setup.as_bytes())?;
+            // Manually cache for future compile_to_bytecode hits.
+            self.bytecode_cache
+                .insert(hex_hash(setup.as_bytes()), bytecode.clone());
+            self.eval_bytecode(&bytecode)?;
+            self.loaded_fn_hashes.insert(body_hash);
+        }
+
+        // ── Phase 2: quick per-event call ─────────────────────────────────
         // Serialise the event to JSON and escape for embedding in a single-quoted
         // JS string literal: \ → \\, ' → \'.
         let event_json = serde_json::to_string(event)
             .map_err(|e| TapError::Transform(format!("serialize event: {e}")))?;
-        let escaped = event_json.replace('\\', "\\\\").replace('\'', "\\'");
+        let escaped = event_json
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029");
 
-        // Build the full module: user function + event injection + result capture.
-        // The module defines f, parses the event from JSON, calls f, stringifies
-        // the result, and stores it on the tap result global property.
-        let script = format!(
-            "{}\nglobalThis.{} = JSON.stringify(f(JSON.parse('{}')));",
-            function_body, self.tap_result_name, escaped,
+        let wrapper = format!(
+            "JSON.stringify(globalThis.__tap_f(JSON.parse('{}')))",
+            escaped,
         );
 
-        // Compile raw (no expression wrapper — the module itself handles
-        // result capture via `globalThis.{name} = ...`).
-        let bytecode = self.do_compile(script.as_bytes())?;
-
-        // Eval the bytecode — will find the result on the global property.
+        // Use do_compile directly (no expression wrapper) to avoid any
+        // edge cases with the expression wrapper interfering with the
+        // __tap_f function reference.  The wrapper is tiny, so re-compiling
+        // is negligible.
+        let full_script = format!("globalThis.{0}={1};", self.tap_result_name, wrapper);
+        let bytecode = self.do_compile(full_script.as_bytes())?;
+        // Phase 2 always uses the wrapper pattern, so has_tap_result is true
+        // for the subsequent eval_bytecode call.
+        self.has_tap_result = true;
         self.eval_bytecode(&bytecode)
     }
 }
@@ -1370,14 +1414,6 @@ fn hex_hash(data: &[u8]) -> String {
 /// With NaN boxing the tag lives in the upper 32 bits of the uint64_t.
 fn is_exception(val: i64) -> bool {
     ((val as u64) >> 32) as u32 == JS_TAG_EXCEPTION
-}
-
-/// QuickJS NaN-boxing tag for `undefined`.
-const JS_TAG_UNDEFINED: u32 = 2;
-
-/// Check whether a `JSValue` (i64) is `undefined`.
-fn is_undefined(val: i64) -> bool {
-    ((val as u64) >> 32) as u32 == JS_TAG_UNDEFINED
 }
 
 // ---------------------------------------------------------------------------

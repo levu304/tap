@@ -32,6 +32,7 @@
 use crate::event::ChangeEvent;
 use crate::transforms::config::{TransformDescriptor, TransformResult};
 use crate::transforms::engine::TransformEngine;
+use crate::transforms::validate::validate_event_envelope;
 
 /// Apply a `Map` descriptor to a [`ChangeEvent`].
 ///
@@ -72,7 +73,10 @@ pub fn apply_map(
 
     match engine.run_transform_js(&script, &event) {
         Ok(json_str) => match serde_json::from_str::<ChangeEvent>(&json_str) {
-            Ok(modified) => TransformResult::Modified(Box::new(modified)),
+            Ok(modified) => match validate_event_envelope(&modified) {
+                Ok(()) => TransformResult::Modified(Box::new(modified)),
+                Err(e) => TransformResult::Error(format!("map produced invalid event: {e}")),
+            },
             Err(e) => TransformResult::Error(format!("map returned invalid ChangeEvent JSON: {e}")),
         },
         Err(e) => TransformResult::Error(format!("map transform failed: {e}")),
@@ -287,6 +291,17 @@ mod tests {
         assert!(msg.contains("invalid ChangeEvent"), "msg: {msg}");
     }
 
+    /// Map emptying the `id` field produces an envelope validation error.
+    #[test]
+    fn map_empty_id_rejected() {
+        let mut engine = TransformEngine::new().expect("engine");
+        let event = make_event(Some(serde_json::json!({"id": 1})), Operation::Create);
+        let desc = make_map("function f(e) { e.id = ''; return e; }");
+        let result = apply_map(event, &mut engine, &desc);
+        let msg = expect_error(result);
+        assert!(msg.contains("invalid event"), "msg: {msg}");
+    }
+
     /// Map returning an invalid `op` value produces a deserialisation error.
     #[test]
     fn map_invalid_op_errors() {
@@ -362,6 +377,23 @@ mod tests {
         let e2 = make_event(Some(serde_json::json!({"id": 2})), Operation::Create);
         let r2 = expect_modified(apply_map(e2, &mut engine, &desc));
         assert_eq!(r2.after.unwrap().get("seq").unwrap(), 1);
+    }
+
+    /// Map preserves Unicode line/paragraph separators in field values
+    /// (U+2028 / U+2029) — valid in JSON but must be escaped in JS
+    /// single-quoted string literals (tap-bmr).
+    #[test]
+    fn map_preserves_unicode_line_separator() {
+        let mut engine = TransformEngine::new().expect("engine");
+        let event = make_event(
+            Some(serde_json::json!({"id": 1, "name": "line1\u{2028}line2"})),
+            Operation::Create,
+        );
+        let desc = make_map("function f(e) { return e; }");
+        let result = apply_map(event, &mut engine, &desc);
+        let modified = expect_modified(result);
+        let after = modified.after.unwrap();
+        assert_eq!(after.get("name").unwrap(), "line1\u{2028}line2");
     }
 
     /// Map that only touches `ts_ms` preserves all other fields.
